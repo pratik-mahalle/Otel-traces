@@ -1,0 +1,23 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  namespace: telemetry
+  name: telemetry-reader
+rules:
+- apiGroups: ["", "apps", "batch"]
+  resources: ["pods", "deployments", "statefulsets", "jobs", "services", "configmaps"]
+  verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: telemetry-reader-binding
+  namespace: telemetry
+subjects:
+- kind: ServiceAccount
+  name: default
+  namespace: telemetry
+roleRef:
+  kind: Role
+  name: telemetry-reader
+  apiGroup: rbac.authorization.k8s.io

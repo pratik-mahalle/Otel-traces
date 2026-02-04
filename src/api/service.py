@@ -493,6 +493,7 @@ async def inject_debug_event(event: Dict[str, Any]):
 async def simulate_trace():
     """Simulate a trace for testing the dashboard"""
     from uuid import uuid4
+    import random
     
     trace_id = str(uuid4())
     
@@ -514,22 +515,82 @@ async def simulate_trace():
     }
     store.add_trace(trace)
     
-    # Create simulated spans
+    # Create simulated spans and events
     agents = ["Orchestrator", "Researcher", "Writer"]
+    event_types = ["agent_start", "llm_request", "llm_response", "tool_call", "agent_complete"]
+    messages = [
+        "Agent started processing request",
+        "Calling LLM model ollama/llama2",
+        "LLM response received (245 tokens)",
+        "Executing tool: search_web",
+        "Agent completed successfully"
+    ]
+    
     for i, agent in enumerate(agents):
+        span_id = str(uuid4())
         span = {
-            "span_id": str(uuid4()),
+            "span_id": span_id,
             "trace_id": trace_id,
             "agent_id": f"agent-{i}",
             "agent_name": agent,
             "span_kind": "agent",
             "status": "completed",
             "start_time": datetime.utcnow().isoformat(),
-            "duration_ms": 500 + (i * 100)
+            "duration_ms": 500 + (i * 100),
+            "token_usage": {
+                "prompt_tokens": random.randint(100, 300),
+                "completion_tokens": random.randint(50, 200),
+                "total_tokens": random.randint(200, 500)
+            }
         }
         store.add_span(span)
+        
+        # Create and broadcast events for this agent
+        for j, (event_type, message) in enumerate(zip(event_types, messages)):
+            event = {
+                "event_id": str(uuid4()),
+                "trace_id": trace_id,
+                "span_id": span_id,
+                "agent_id": f"agent-{i}",
+                "agent_name": agent,
+                "event_type": event_type,
+                "message": f"{agent}: {message}",
+                "timestamp": datetime.utcnow().isoformat(),
+                "severity": "info",
+                "data": {"step": j + 1, "agent_index": i}
+            }
+            store.add_event(event)
+            # Broadcast to WebSocket clients
+            await manager.broadcast(event)
+            # Small delay between events for visual effect
+            await asyncio.sleep(0.1)
     
-    return {"trace_id": trace_id, "message": "Simulated trace created"}
+    # Create handoffs
+    handoffs = [
+        ("Orchestrator", "Researcher", "Delegate research task"),
+        ("Researcher", "Writer", "Pass research results for writing")
+    ]
+    for source, target, reason in handoffs:
+        handoff = {
+            "handoff_id": str(uuid4()),
+            "trace_id": trace_id,
+            "source_agent_id": f"agent-{agents.index(source)}",
+            "source_agent_name": source,
+            "target_agent_id": f"agent-{agents.index(target)}",
+            "target_agent_name": target,
+            "reason": reason,
+            "timestamp": datetime.utcnow().isoformat()
+        }
+        store.add_handoff(handoff)
+        await manager.broadcast({
+            "event_type": "handoff",
+            "message": f"Handoff: {source} → {target} ({reason})",
+            "agent_name": source,
+            "timestamp": datetime.utcnow().isoformat(),
+            **handoff
+        })
+    
+    return {"trace_id": trace_id, "message": "Simulated trace created with events"}
 
 
 # Oracle Monitor endpoints for unified system state

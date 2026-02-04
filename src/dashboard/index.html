@@ -1,5 +1,6 @@
 <!DOCTYPE html>
 <html lang="en">
+
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -66,16 +67,29 @@
             width: 200%;
             height: 200%;
             background: radial-gradient(circle at 20% 80%, rgba(59, 130, 246, 0.15) 0%, transparent 50%),
-                        radial-gradient(circle at 80% 20%, rgba(139, 92, 246, 0.15) 0%, transparent 50%),
-                        radial-gradient(circle at 40% 40%, rgba(6, 182, 212, 0.1) 0%, transparent 40%);
+                radial-gradient(circle at 80% 20%, rgba(139, 92, 246, 0.15) 0%, transparent 50%),
+                radial-gradient(circle at 40% 40%, rgba(6, 182, 212, 0.1) 0%, transparent 40%);
             animation: float 20s ease-in-out infinite;
         }
 
         @keyframes float {
-            0%, 100% { transform: translate(0, 0) rotate(0deg); }
-            25% { transform: translate(2%, 2%) rotate(1deg); }
-            50% { transform: translate(0, 4%) rotate(0deg); }
-            75% { transform: translate(-2%, 2%) rotate(-1deg); }
+
+            0%,
+            100% {
+                transform: translate(0, 0) rotate(0deg);
+            }
+
+            25% {
+                transform: translate(2%, 2%) rotate(1deg);
+            }
+
+            50% {
+                transform: translate(0, 4%) rotate(0deg);
+            }
+
+            75% {
+                transform: translate(-2%, 2%) rotate(-1deg);
+            }
         }
 
         /* Glass card effect */
@@ -115,18 +129,37 @@
 
         /* Animations */
         @keyframes pulse-glow {
-            0%, 100% { box-shadow: 0 0 20px rgba(59, 130, 246, 0.3); }
-            50% { box-shadow: 0 0 40px rgba(59, 130, 246, 0.6); }
+
+            0%,
+            100% {
+                box-shadow: 0 0 20px rgba(59, 130, 246, 0.3);
+            }
+
+            50% {
+                box-shadow: 0 0 40px rgba(59, 130, 246, 0.6);
+            }
         }
 
         @keyframes slide-up {
-            from { opacity: 0; transform: translateY(20px); }
-            to { opacity: 1; transform: translateY(0); }
+            from {
+                opacity: 0;
+                transform: translateY(20px);
+            }
+
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
         }
 
         @keyframes fade-in {
-            from { opacity: 0; }
-            to { opacity: 1; }
+            from {
+                opacity: 0;
+            }
+
+            to {
+                opacity: 1;
+            }
         }
 
         .animate-slide-up {
@@ -218,13 +251,28 @@
         }
 
         /* Metric card gradient backgrounds */
-        .metric-gradient-1 { background: var(--gradient-1); }
-        .metric-gradient-2 { background: var(--gradient-2); }
-        .metric-gradient-3 { background: var(--gradient-3); }
-        .metric-gradient-4 { background: var(--gradient-4); }
-        .metric-gradient-5 { background: var(--gradient-5); }
+        .metric-gradient-1 {
+            background: var(--gradient-1);
+        }
+
+        .metric-gradient-2 {
+            background: var(--gradient-2);
+        }
+
+        .metric-gradient-3 {
+            background: var(--gradient-3);
+        }
+
+        .metric-gradient-4 {
+            background: var(--gradient-4);
+        }
+
+        .metric-gradient-5 {
+            background: var(--gradient-5);
+        }
     </style>
 </head>
+
 <body>
     <div class="bg-animation"></div>
     <div id="root"></div>
@@ -244,21 +292,21 @@
             const connect = useCallback(() => {
                 try {
                     const ws = new WebSocket(`ws://localhost:8080/ws/debug/${clientId}`);
-                    
+
                     ws.onopen = () => {
                         setConnected(true);
                     };
-                    
+
                     ws.onmessage = (event) => {
                         const data = JSON.parse(event.data);
                         setEvents(prev => [...prev.slice(-50), { ...data, _id: Date.now() }]);
                     };
-                    
+
                     ws.onclose = () => {
                         setConnected(false);
                         setTimeout(connect, 3000);
                     };
-                    
+
                     wsRef.current = ws;
                 } catch (e) {
                     console.error('WebSocket error:', e);
@@ -322,8 +370,8 @@
                             🔮
                         </div>
                         <div>
-                            <h1 style={{ 
-                                fontSize: '24px', 
+                            <h1 style={{
+                                fontSize: '24px',
                                 fontWeight: '700',
                                 background: 'linear-gradient(135deg, #fff 0%, #a0a0ff 100%)',
                                 WebkitBackgroundClip: 'text',
@@ -336,7 +384,7 @@
                             </p>
                         </div>
                     </div>
-                    
+
                     <div style={{ display: 'flex', alignItems: 'center', gap: '16px' }}>
                         <div style={{
                             display: 'flex',
@@ -352,7 +400,7 @@
                                 {connected ? 'Live' : 'Disconnected'}
                             </span>
                         </div>
-                        
+
                         <button
                             onClick={onSimulate}
                             style={{
@@ -378,7 +426,7 @@
 
         function MetricCard({ title, value, subtitle, icon, gradient, delay = 0 }) {
             return (
-                <div 
+                <div
                     className="glass-card animate-slide-up"
                     style={{
                         padding: '24px',
@@ -398,14 +446,14 @@
                         opacity: 0.2,
                         filter: 'blur(30px)'
                     }} />
-                    
+
                     <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between' }}>
                         <div>
                             <p style={{ color: 'var(--text-secondary)', fontSize: '13px', marginBottom: '8px' }}>
                                 {title}
                             </p>
-                            <p style={{ 
-                                fontSize: '32px', 
+                            <p style={{
+                                fontSize: '32px',
                                 fontWeight: '700',
                                 background: gradient,
                                 WebkitBackgroundClip: 'text',
@@ -453,31 +501,31 @@
                     gap: '20px',
                     marginBottom: '24px'
                 }}>
-                    <MetricCard 
-                        title="Active Agents" 
-                        value={summary.agents} 
-                        icon="🤖" 
+                    <MetricCard
+                        title="Active Agents"
+                        value={summary.agents}
+                        icon="🤖"
                         gradient="var(--gradient-1)"
                         delay={0}
                     />
-                    <MetricCard 
-                        title="Running Pods" 
-                        value={summary.pods} 
-                        icon="🟢" 
+                    <MetricCard
+                        title="Running Pods"
+                        value={summary.pods}
+                        icon="🟢"
                         gradient="var(--gradient-4)"
                         delay={100}
                     />
-                    <MetricCard 
-                        title="Queued Tasks" 
-                        value={summary.queued} 
-                        icon="📋" 
+                    <MetricCard
+                        title="Queued Tasks"
+                        value={summary.queued}
+                        icon="📋"
                         gradient="var(--gradient-5)"
                         delay={200}
                     />
-                    <MetricCard 
-                        title="LLM Models" 
-                        value={summary.models} 
-                        icon="🧠" 
+                    <MetricCard
+                        title="LLM Models"
+                        value={summary.models}
+                        icon="🧠"
                         gradient="var(--gradient-3)"
                         delay={300}
                     />
@@ -503,7 +551,7 @@
                     </h3>
                     <div style={{ display: 'grid', gap: '12px' }}>
                         {agents.map((agent, idx) => (
-                            <div 
+                            <div
                                 key={agent.name}
                                 style={{
                                     padding: '16px',
@@ -516,7 +564,7 @@
                                     transition: 'all 0.3s ease'
                                 }}
                             >
-                                <div 
+                                <div
                                     className="agent-node"
                                     style={{ background: colors[idx % colors.length], flexShrink: 0 }}
                                 >
@@ -673,7 +721,7 @@
                         <span>📡</span> Live Events
                         <span className="status-dot running" style={{ marginLeft: '8px' }}></span>
                     </h3>
-                    <div 
+                    <div
                         ref={containerRef}
                         style={{
                             height: '300px',
@@ -690,7 +738,7 @@
                             events.map((event) => {
                                 const style = getEventStyle(event);
                                 return (
-                                    <div 
+                                    <div
                                         key={event._id}
                                         className="animate-fade-in"
                                         style={{
@@ -751,11 +799,11 @@
                                         padding: '16px',
                                         marginBottom: '8px',
                                         borderRadius: '12px',
-                                        background: selected?.trace_id === trace.trace_id 
-                                            ? 'rgba(59, 130, 246, 0.2)' 
+                                        background: selected?.trace_id === trace.trace_id
+                                            ? 'rgba(59, 130, 246, 0.2)'
                                             : 'rgba(255,255,255,0.03)',
-                                        border: selected?.trace_id === trace.trace_id 
-                                            ? '1px solid var(--accent-blue)' 
+                                        border: selected?.trace_id === trace.trace_id
+                                            ? '1px solid var(--accent-blue)'
                                             : '1px solid transparent',
                                         cursor: 'pointer',
                                         transition: 'all 0.2s ease'
@@ -771,11 +819,11 @@
                                             fontSize: '11px',
                                             fontWeight: '600',
                                             background: trace.status === 'completed' ? 'rgba(16, 185, 129, 0.2)' :
-                                                       trace.status === 'failed' ? 'rgba(239, 68, 68, 0.2)' :
-                                                       'rgba(245, 158, 11, 0.2)',
+                                                trace.status === 'failed' ? 'rgba(239, 68, 68, 0.2)' :
+                                                    'rgba(245, 158, 11, 0.2)',
                                             color: trace.status === 'completed' ? 'var(--accent-green)' :
-                                                  trace.status === 'failed' ? 'var(--accent-red)' :
-                                                  'var(--accent-yellow)'
+                                                trace.status === 'failed' ? 'var(--accent-red)' :
+                                                    'var(--accent-yellow)'
                                         }}>
                                             {trace.status}
                                         </span>
@@ -794,6 +842,267 @@
                         )}
                     </div>
                 </div>
+            );
+        }
+
+        function TraceDetail({ trace, onClose }) {
+            const [traceData, setTraceData] = useState(null);
+            const [loading, setLoading] = useState(true);
+
+            useEffect(() => {
+                if (!trace) return;
+
+                const fetchTraceDetails = async () => {
+                    setLoading(true);
+                    try {
+                        const res = await fetch(`${API_BASE}/api/v1/traces/${trace.trace_id}`);
+                        const data = await res.json();
+                        setTraceData(data);
+                    } catch (e) {
+                        console.error('Failed to fetch trace details:', e);
+                    } finally {
+                        setLoading(false);
+                    }
+                };
+
+                fetchTraceDetails();
+            }, [trace?.trace_id]);
+
+            if (!trace) return null;
+
+            return (
+                <div className="glass-card animate-slide-up" style={{
+                    position: 'fixed',
+                    top: '50%',
+                    left: '50%',
+                    transform: 'translate(-50%, -50%)',
+                    width: '80%',
+                    maxWidth: '900px',
+                    maxHeight: '85vh',
+                    overflow: 'hidden',
+                    zIndex: 1000,
+                    boxShadow: '0 25px 50px rgba(0, 0, 0, 0.5)'
+                }}>
+                    {/* Header */}
+                    <div style={{
+                        padding: '20px 24px',
+                        borderBottom: '1px solid var(--border-glass)',
+                        display: 'flex',
+                        justifyContent: 'space-between',
+                        alignItems: 'center'
+                    }}>
+                        <div>
+                            <h2 style={{ fontSize: '18px', fontWeight: '600', marginBottom: '4px' }}>
+                                Trace Details
+                            </h2>
+                            <p style={{ fontFamily: 'monospace', color: 'var(--accent-cyan)', fontSize: '13px' }}>
+                                {trace.trace_id}
+                            </p>
+                        </div>
+                        <button
+                            onClick={onClose}
+                            style={{
+                                width: '36px',
+                                height: '36px',
+                                borderRadius: '10px',
+                                border: 'none',
+                                background: 'rgba(255,255,255,0.1)',
+                                color: 'white',
+                                cursor: 'pointer',
+                                fontSize: '18px',
+                                transition: 'all 0.2s ease'
+                            }}
+                            onMouseOver={e => e.target.style.background = 'rgba(239, 68, 68, 0.3)'}
+                            onMouseOut={e => e.target.style.background = 'rgba(255,255,255,0.1)'}
+                        >
+                            ✕
+                        </button>
+                    </div>
+
+                    {/* Content */}
+                    <div style={{ padding: '24px', overflowY: 'auto', maxHeight: 'calc(85vh - 100px)' }}>
+                        {loading ? (
+                            <div style={{ textAlign: 'center', padding: '40px' }}>
+                                <div style={{
+                                    width: '40px',
+                                    height: '40px',
+                                    border: '3px solid var(--border-glass)',
+                                    borderTopColor: 'var(--accent-cyan)',
+                                    borderRadius: '50%',
+                                    margin: '0 auto 16px',
+                                    animation: 'spin 1s linear infinite'
+                                }} />
+                                <p style={{ color: 'var(--text-muted)' }}>Loading trace details...</p>
+                                <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
+                            </div>
+                        ) : (
+                            <>
+                                {/* Summary Cards */}
+                                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '16px', marginBottom: '24px' }}>
+                                    <div style={{ padding: '16px', background: 'rgba(255,255,255,0.05)', borderRadius: '12px' }}>
+                                        <p style={{ fontSize: '11px', color: 'var(--text-muted)', marginBottom: '4px' }}>Status</p>
+                                        <p style={{
+                                            fontSize: '16px',
+                                            fontWeight: '600',
+                                            color: trace.status === 'completed' ? 'var(--accent-green)' :
+                                                trace.status === 'failed' ? 'var(--accent-red)' : 'var(--accent-yellow)'
+                                        }}>
+                                            {trace.status?.toUpperCase()}
+                                        </p>
+                                    </div>
+                                    <div style={{ padding: '16px', background: 'rgba(255,255,255,0.05)', borderRadius: '12px' }}>
+                                        <p style={{ fontSize: '11px', color: 'var(--text-muted)', marginBottom: '4px' }}>Duration</p>
+                                        <p style={{ fontSize: '16px', fontWeight: '600' }}>{trace.total_duration_ms}ms</p>
+                                    </div>
+                                    <div style={{ padding: '16px', background: 'rgba(255,255,255,0.05)', borderRadius: '12px' }}>
+                                        <p style={{ fontSize: '11px', color: 'var(--text-muted)', marginBottom: '4px' }}>Tokens</p>
+                                        <p style={{ fontSize: '16px', fontWeight: '600' }}>{trace.total_tokens?.toLocaleString()}</p>
+                                    </div>
+                                    <div style={{ padding: '16px', background: 'rgba(255,255,255,0.05)', borderRadius: '12px' }}>
+                                        <p style={{ fontSize: '11px', color: 'var(--text-muted)', marginBottom: '4px' }}>Agents</p>
+                                        <p style={{ fontSize: '16px', fontWeight: '600' }}>{trace.agent_count}</p>
+                                    </div>
+                                </div>
+
+                                {/* Input/Output */}
+                                <div style={{ marginBottom: '24px' }}>
+                                    <h4 style={{ fontSize: '14px', fontWeight: '600', marginBottom: '12px', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                                        <span>📝</span> Input / Output
+                                    </h4>
+                                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px' }}>
+                                        <div style={{ padding: '16px', background: 'rgba(59, 130, 246, 0.1)', borderRadius: '12px', border: '1px solid rgba(59, 130, 246, 0.2)' }}>
+                                            <p style={{ fontSize: '11px', color: 'var(--accent-blue)', marginBottom: '8px', fontWeight: '600' }}>USER INPUT</p>
+                                            <p style={{ fontSize: '13px', color: 'var(--text-secondary)' }}>{trace.user_input || 'N/A'}</p>
+                                        </div>
+                                        <div style={{ padding: '16px', background: 'rgba(16, 185, 129, 0.1)', borderRadius: '12px', border: '1px solid rgba(16, 185, 129, 0.2)' }}>
+                                            <p style={{ fontSize: '11px', color: 'var(--accent-green)', marginBottom: '8px', fontWeight: '600' }}>FINAL OUTPUT</p>
+                                            <p style={{ fontSize: '13px', color: 'var(--text-secondary)' }}>{trace.final_output || traceData?.trace?.final_output || 'N/A'}</p>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                {/* Spans */}
+                                {traceData?.spans?.length > 0 && (
+                                    <div style={{ marginBottom: '24px' }}>
+                                        <h4 style={{ fontSize: '14px', fontWeight: '600', marginBottom: '12px', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                                            <span>🔗</span> Spans ({traceData.spans.length})
+                                        </h4>
+                                        <div className="timeline-container">
+                                            {traceData.spans.map((span, idx) => (
+                                                <div key={span.span_id} className="timeline-item" style={{
+                                                    padding: '12px 16px',
+                                                    background: 'rgba(255,255,255,0.03)',
+                                                    borderRadius: '8px',
+                                                    marginBottom: '8px'
+                                                }}>
+                                                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                                                        <div>
+                                                            <span style={{ fontWeight: '600', color: 'var(--accent-purple)' }}>
+                                                                {span.agent_name}
+                                                            </span>
+                                                            <span style={{ fontSize: '12px', color: 'var(--text-muted)', marginLeft: '8px' }}>
+                                                                [{span.span_kind}]
+                                                            </span>
+                                                        </div>
+                                                        <div style={{ display: 'flex', gap: '12px', fontSize: '12px', color: 'var(--text-secondary)' }}>
+                                                            <span>⏱️ {span.duration_ms}ms</span>
+                                                            {span.token_usage && (
+                                                                <span>🔤 {span.token_usage.total_tokens} tokens</span>
+                                                            )}
+                                                            <span className={`status-dot ${span.status}`} style={{ marginLeft: '4px' }}></span>
+                                                        </div>
+                                                    </div>
+                                                </div>
+                                            ))}
+                                        </div>
+                                    </div>
+                                )}
+
+                                {/* Events */}
+                                {traceData?.events?.length > 0 && (
+                                    <div style={{ marginBottom: '24px' }}>
+                                        <h4 style={{ fontSize: '14px', fontWeight: '600', marginBottom: '12px', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                                            <span>📡</span> Events ({traceData.events.length})
+                                        </h4>
+                                        <div style={{ maxHeight: '200px', overflowY: 'auto' }}>
+                                            {traceData.events.map((event, idx) => (
+                                                <div key={event.event_id || idx} style={{
+                                                    padding: '10px 14px',
+                                                    marginBottom: '6px',
+                                                    borderRadius: '8px',
+                                                    background: 'rgba(255,255,255,0.03)',
+                                                    borderLeft: '3px solid var(--accent-cyan)',
+                                                    fontSize: '12px'
+                                                }}>
+                                                    <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '4px' }}>
+                                                        <span style={{ color: 'var(--accent-cyan)', fontWeight: '600' }}>
+                                                            [{event.event_type}]
+                                                        </span>
+                                                        <span style={{ color: 'var(--text-muted)', fontSize: '10px' }}>
+                                                            {new Date(event.timestamp).toLocaleTimeString()}
+                                                        </span>
+                                                    </div>
+                                                    <p style={{ color: 'var(--text-secondary)' }}>{event.message}</p>
+                                                </div>
+                                            ))}
+                                        </div>
+                                    </div>
+                                )}
+
+                                {/* Handoffs */}
+                                {traceData?.handoffs?.length > 0 && (
+                                    <div>
+                                        <h4 style={{ fontSize: '14px', fontWeight: '600', marginBottom: '12px', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                                            <span>🤝</span> Handoffs ({traceData.handoffs.length})
+                                        </h4>
+                                        {traceData.handoffs.map((handoff, idx) => (
+                                            <div key={handoff.handoff_id || idx} style={{
+                                                padding: '12px 16px',
+                                                marginBottom: '8px',
+                                                borderRadius: '8px',
+                                                background: 'rgba(245, 158, 11, 0.1)',
+                                                border: '1px solid rgba(245, 158, 11, 0.2)'
+                                            }}>
+                                                <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+                                                    <span style={{ fontWeight: '600', color: 'var(--accent-purple)' }}>
+                                                        {handoff.source_agent_name}
+                                                    </span>
+                                                    <span style={{ color: 'var(--accent-yellow)' }}>→</span>
+                                                    <span style={{ fontWeight: '600', color: 'var(--accent-cyan)' }}>
+                                                        {handoff.target_agent_name}
+                                                    </span>
+                                                </div>
+                                                <p style={{ fontSize: '12px', color: 'var(--text-muted)', marginTop: '6px' }}>
+                                                    {handoff.reason}
+                                                </p>
+                                            </div>
+                                        ))}
+                                    </div>
+                                )}
+                            </>
+                        )}
+                    </div>
+                </div>
+            );
+        }
+
+        // Modal overlay
+        function ModalOverlay({ visible, onClose }) {
+            if (!visible) return null;
+            return (
+                <div
+                    onClick={onClose}
+                    style={{
+                        position: 'fixed',
+                        top: 0,
+                        left: 0,
+                        right: 0,
+                        bottom: 0,
+                        background: 'rgba(0, 0, 0, 0.7)',
+                        backdropFilter: 'blur(4px)',
+                        zIndex: 999
+                    }}
+                />
             );
         }
 
@@ -834,10 +1143,10 @@
             return (
                 <div style={{ minHeight: '100vh' }}>
                     <Header connected={connected} onSimulate={handleSimulate} />
-                    
+
                     <main style={{ padding: '24px 32px' }}>
                         <SystemStatus oracleState={oracleState} />
-                        
+
                         <div style={{
                             display: 'grid',
                             gridTemplateColumns: '1fr 1fr 1fr',
@@ -848,21 +1157,21 @@
                             <WorkloadStatus workload={oracleState?.workload} />
                             <LLMUsage models={oracleState?.litellm} />
                         </div>
-                        
+
                         <div style={{
                             display: 'grid',
                             gridTemplateColumns: '1fr 1fr',
                             gap: '24px'
                         }}>
-                            <TracesList 
-                                traces={traces} 
+                            <TracesList
+                                traces={traces}
                                 selected={selectedTrace}
                                 onSelect={setSelectedTrace}
                             />
                             <EventStream events={events} />
                         </div>
                     </main>
-                    
+
                     <footer style={{
                         padding: '20px 32px',
                         borderTop: '1px solid var(--border-glass)',
@@ -872,6 +1181,16 @@
                     }}>
                         Oracle Monitor • Multi-Agent Telemetry System • Built for Claude Code
                     </footer>
+
+                    {/* Trace Detail Modal */}
+                    <ModalOverlay
+                        visible={selectedTrace !== null}
+                        onClose={() => setSelectedTrace(null)}
+                    />
+                    <TraceDetail
+                        trace={selectedTrace}
+                        onClose={() => setSelectedTrace(null)}
+                    />
                 </div>
             );
         }
@@ -880,4 +1199,5 @@
         ReactDOM.createRoot(document.getElementById('root')).render(<Dashboard />);
     </script>
 </body>
+
 </html>
