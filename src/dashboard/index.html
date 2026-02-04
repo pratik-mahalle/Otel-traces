@@ -1,0 +1,883 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Oracle Monitor - Multi-Agent Telemetry</title>
+    <meta name="description" content="Real-time telemetry dashboard for debugging multi-agent AI systems">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.5/babel.min.js"></script>
+    <style>
+        :root {
+            --bg-primary: #0a0a0f;
+            --bg-secondary: #12121a;
+            --bg-card: rgba(20, 20, 30, 0.7);
+            --bg-glass: rgba(255, 255, 255, 0.05);
+            --border-glass: rgba(255, 255, 255, 0.1);
+            --text-primary: #ffffff;
+            --text-secondary: #a0a0b0;
+            --text-muted: #606070;
+            --accent-blue: #3b82f6;
+            --accent-purple: #8b5cf6;
+            --accent-cyan: #06b6d4;
+            --accent-green: #10b981;
+            --accent-yellow: #f59e0b;
+            --accent-red: #ef4444;
+            --accent-pink: #ec4899;
+            --gradient-1: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            --gradient-2: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
+            --gradient-3: linear-gradient(135deg, #4facfe 0%, #00f2fe 100%);
+            --gradient-4: linear-gradient(135deg, #43e97b 0%, #38f9d7 100%);
+            --gradient-5: linear-gradient(135deg, #fa709a 0%, #fee140 100%);
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+            background: var(--bg-primary);
+            color: var(--text-primary);
+            min-height: 100vh;
+            overflow-x: hidden;
+        }
+
+        /* Animated background */
+        .bg-animation {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            z-index: -1;
+            overflow: hidden;
+        }
+
+        .bg-animation::before {
+            content: '';
+            position: absolute;
+            top: -50%;
+            left: -50%;
+            width: 200%;
+            height: 200%;
+            background: radial-gradient(circle at 20% 80%, rgba(59, 130, 246, 0.15) 0%, transparent 50%),
+                        radial-gradient(circle at 80% 20%, rgba(139, 92, 246, 0.15) 0%, transparent 50%),
+                        radial-gradient(circle at 40% 40%, rgba(6, 182, 212, 0.1) 0%, transparent 40%);
+            animation: float 20s ease-in-out infinite;
+        }
+
+        @keyframes float {
+            0%, 100% { transform: translate(0, 0) rotate(0deg); }
+            25% { transform: translate(2%, 2%) rotate(1deg); }
+            50% { transform: translate(0, 4%) rotate(0deg); }
+            75% { transform: translate(-2%, 2%) rotate(-1deg); }
+        }
+
+        /* Glass card effect */
+        .glass-card {
+            background: var(--bg-glass);
+            backdrop-filter: blur(20px);
+            -webkit-backdrop-filter: blur(20px);
+            border: 1px solid var(--border-glass);
+            border-radius: 16px;
+            transition: all 0.3s ease;
+        }
+
+        .glass-card:hover {
+            border-color: rgba(255, 255, 255, 0.2);
+            transform: translateY(-2px);
+            box-shadow: 0 20px 40px rgba(0, 0, 0, 0.3);
+        }
+
+        /* Scrollbar */
+        ::-webkit-scrollbar {
+            width: 6px;
+            height: 6px;
+        }
+
+        ::-webkit-scrollbar-track {
+            background: transparent;
+        }
+
+        ::-webkit-scrollbar-thumb {
+            background: rgba(255, 255, 255, 0.2);
+            border-radius: 3px;
+        }
+
+        ::-webkit-scrollbar-thumb:hover {
+            background: rgba(255, 255, 255, 0.3);
+        }
+
+        /* Animations */
+        @keyframes pulse-glow {
+            0%, 100% { box-shadow: 0 0 20px rgba(59, 130, 246, 0.3); }
+            50% { box-shadow: 0 0 40px rgba(59, 130, 246, 0.6); }
+        }
+
+        @keyframes slide-up {
+            from { opacity: 0; transform: translateY(20px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        @keyframes fade-in {
+            from { opacity: 0; }
+            to { opacity: 1; }
+        }
+
+        .animate-slide-up {
+            animation: slide-up 0.5s ease forwards;
+        }
+
+        .animate-fade-in {
+            animation: fade-in 0.3s ease forwards;
+        }
+
+        /* Status indicators */
+        .status-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            display: inline-block;
+        }
+
+        .status-dot.running {
+            background: var(--accent-green);
+            box-shadow: 0 0 10px var(--accent-green);
+            animation: pulse-glow 2s ease-in-out infinite;
+        }
+
+        .status-dot.completed {
+            background: var(--accent-blue);
+        }
+
+        .status-dot.failed {
+            background: var(--accent-red);
+            box-shadow: 0 0 10px var(--accent-red);
+        }
+
+        .status-dot.pending {
+            background: var(--accent-yellow);
+            animation: pulse-glow 1s ease-in-out infinite;
+        }
+
+        /* Timeline */
+        .timeline-container {
+            position: relative;
+            padding-left: 24px;
+        }
+
+        .timeline-container::before {
+            content: '';
+            position: absolute;
+            left: 8px;
+            top: 0;
+            bottom: 0;
+            width: 2px;
+            background: linear-gradient(to bottom, var(--accent-purple), var(--accent-cyan), transparent);
+        }
+
+        .timeline-item {
+            position: relative;
+            margin-bottom: 16px;
+        }
+
+        .timeline-item::before {
+            content: '';
+            position: absolute;
+            left: -20px;
+            top: 8px;
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            background: var(--accent-cyan);
+            border: 2px solid var(--bg-primary);
+            box-shadow: 0 0 10px var(--accent-cyan);
+        }
+
+        /* Agent node */
+        .agent-node {
+            width: 60px;
+            height: 60px;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: 600;
+            font-size: 14px;
+            transition: all 0.3s ease;
+            cursor: pointer;
+        }
+
+        .agent-node:hover {
+            transform: scale(1.1);
+        }
+
+        /* Metric card gradient backgrounds */
+        .metric-gradient-1 { background: var(--gradient-1); }
+        .metric-gradient-2 { background: var(--gradient-2); }
+        .metric-gradient-3 { background: var(--gradient-3); }
+        .metric-gradient-4 { background: var(--gradient-4); }
+        .metric-gradient-5 { background: var(--gradient-5); }
+    </style>
+</head>
+<body>
+    <div class="bg-animation"></div>
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect, useRef, useCallback, useMemo } = React;
+
+        // API Configuration
+        const API_BASE = 'http://localhost:8080';
+
+        // Custom hooks
+        function useWebSocket(clientId) {
+            const [events, setEvents] = useState([]);
+            const [connected, setConnected] = useState(false);
+            const wsRef = useRef(null);
+
+            const connect = useCallback(() => {
+                try {
+                    const ws = new WebSocket(`ws://localhost:8080/ws/debug/${clientId}`);
+                    
+                    ws.onopen = () => {
+                        setConnected(true);
+                    };
+                    
+                    ws.onmessage = (event) => {
+                        const data = JSON.parse(event.data);
+                        setEvents(prev => [...prev.slice(-50), { ...data, _id: Date.now() }]);
+                    };
+                    
+                    ws.onclose = () => {
+                        setConnected(false);
+                        setTimeout(connect, 3000);
+                    };
+                    
+                    wsRef.current = ws;
+                } catch (e) {
+                    console.error('WebSocket error:', e);
+                }
+            }, [clientId]);
+
+            useEffect(() => {
+                connect();
+                return () => wsRef.current?.close();
+            }, [connect]);
+
+            return { events, connected };
+        }
+
+        function useOracleState() {
+            const [state, setState] = useState(null);
+            const [loading, setLoading] = useState(true);
+
+            const fetchState = useCallback(async () => {
+                try {
+                    const res = await fetch(`${API_BASE}/api/v1/oracle/state`);
+                    const data = await res.json();
+                    setState(data);
+                } catch (e) {
+                    console.error('Failed to fetch Oracle state:', e);
+                } finally {
+                    setLoading(false);
+                }
+            }, []);
+
+            useEffect(() => {
+                fetchState();
+                const interval = setInterval(fetchState, 5000);
+                return () => clearInterval(interval);
+            }, [fetchState]);
+
+            return { state, loading, refresh: fetchState };
+        }
+
+        // Components
+        function Header({ connected, onSimulate }) {
+            return (
+                <header style={{
+                    padding: '20px 32px',
+                    display: 'flex',
+                    justifyContent: 'space-between',
+                    alignItems: 'center',
+                    borderBottom: '1px solid var(--border-glass)'
+                }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '16px' }}>
+                        <div style={{
+                            width: '48px',
+                            height: '48px',
+                            borderRadius: '12px',
+                            background: 'var(--gradient-1)',
+                            display: 'flex',
+                            alignItems: 'center',
+                            justifyContent: 'center',
+                            fontSize: '24px'
+                        }}>
+                            🔮
+                        </div>
+                        <div>
+                            <h1 style={{ 
+                                fontSize: '24px', 
+                                fontWeight: '700',
+                                background: 'linear-gradient(135deg, #fff 0%, #a0a0ff 100%)',
+                                WebkitBackgroundClip: 'text',
+                                WebkitTextFillColor: 'transparent'
+                            }}>
+                                Oracle Monitor
+                            </h1>
+                            <p style={{ color: 'var(--text-secondary)', fontSize: '14px' }}>
+                                Multi-Agent Telemetry Dashboard
+                            </p>
+                        </div>
+                    </div>
+                    
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '16px' }}>
+                        <div style={{
+                            display: 'flex',
+                            alignItems: 'center',
+                            gap: '8px',
+                            padding: '8px 16px',
+                            borderRadius: '20px',
+                            background: connected ? 'rgba(16, 185, 129, 0.2)' : 'rgba(239, 68, 68, 0.2)',
+                            border: `1px solid ${connected ? 'var(--accent-green)' : 'var(--accent-red)'}`,
+                        }}>
+                            <span className={`status-dot ${connected ? 'running' : 'failed'}`}></span>
+                            <span style={{ fontSize: '14px', fontWeight: '500' }}>
+                                {connected ? 'Live' : 'Disconnected'}
+                            </span>
+                        </div>
+                        
+                        <button
+                            onClick={onSimulate}
+                            style={{
+                                padding: '10px 20px',
+                                borderRadius: '10px',
+                                border: 'none',
+                                background: 'var(--gradient-3)',
+                                color: 'white',
+                                fontWeight: '600',
+                                cursor: 'pointer',
+                                transition: 'all 0.3s ease',
+                                fontSize: '14px'
+                            }}
+                            onMouseOver={e => e.target.style.transform = 'scale(1.05)'}
+                            onMouseOut={e => e.target.style.transform = 'scale(1)'}
+                        >
+                            ⚡ Simulate Trace
+                        </button>
+                    </div>
+                </header>
+            );
+        }
+
+        function MetricCard({ title, value, subtitle, icon, gradient, delay = 0 }) {
+            return (
+                <div 
+                    className="glass-card animate-slide-up"
+                    style={{
+                        padding: '24px',
+                        animationDelay: `${delay}ms`,
+                        position: 'relative',
+                        overflow: 'hidden'
+                    }}
+                >
+                    <div style={{
+                        position: 'absolute',
+                        top: '-20px',
+                        right: '-20px',
+                        width: '100px',
+                        height: '100px',
+                        borderRadius: '50%',
+                        background: gradient,
+                        opacity: 0.2,
+                        filter: 'blur(30px)'
+                    }} />
+                    
+                    <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between' }}>
+                        <div>
+                            <p style={{ color: 'var(--text-secondary)', fontSize: '13px', marginBottom: '8px' }}>
+                                {title}
+                            </p>
+                            <p style={{ 
+                                fontSize: '32px', 
+                                fontWeight: '700',
+                                background: gradient,
+                                WebkitBackgroundClip: 'text',
+                                WebkitTextFillColor: 'transparent'
+                            }}>
+                                {value}
+                            </p>
+                            {subtitle && (
+                                <p style={{ color: 'var(--text-muted)', fontSize: '12px', marginTop: '4px' }}>
+                                    {subtitle}
+                                </p>
+                            )}
+                        </div>
+                        <div style={{
+                            width: '48px',
+                            height: '48px',
+                            borderRadius: '12px',
+                            background: gradient,
+                            display: 'flex',
+                            alignItems: 'center',
+                            justifyContent: 'center',
+                            fontSize: '24px'
+                        }}>
+                            {icon}
+                        </div>
+                    </div>
+                </div>
+            );
+        }
+
+        function SystemStatus({ oracleState }) {
+            if (!oracleState) return null;
+
+            const summary = {
+                agents: oracleState.agents?.length || 0,
+                pods: oracleState.workload?.reduce((acc, w) => acc + (w.live?.active_pods || 0), 0) || 0,
+                queued: oracleState.queues?.reduce((acc, q) => acc + (q.tasks?.length || 0), 0) || 0,
+                models: oracleState.litellm?.length || 0
+            };
+
+            return (
+                <div style={{
+                    display: 'grid',
+                    gridTemplateColumns: 'repeat(4, 1fr)',
+                    gap: '20px',
+                    marginBottom: '24px'
+                }}>
+                    <MetricCard 
+                        title="Active Agents" 
+                        value={summary.agents} 
+                        icon="🤖" 
+                        gradient="var(--gradient-1)"
+                        delay={0}
+                    />
+                    <MetricCard 
+                        title="Running Pods" 
+                        value={summary.pods} 
+                        icon="🟢" 
+                        gradient="var(--gradient-4)"
+                        delay={100}
+                    />
+                    <MetricCard 
+                        title="Queued Tasks" 
+                        value={summary.queued} 
+                        icon="📋" 
+                        gradient="var(--gradient-5)"
+                        delay={200}
+                    />
+                    <MetricCard 
+                        title="LLM Models" 
+                        value={summary.models} 
+                        icon="🧠" 
+                        gradient="var(--gradient-3)"
+                        delay={300}
+                    />
+                </div>
+            );
+        }
+
+        function AgentsList({ agents }) {
+            if (!agents?.length) {
+                return (
+                    <div className="glass-card" style={{ padding: '32px', textAlign: 'center' }}>
+                        <p style={{ color: 'var(--text-secondary)' }}>No agents registered</p>
+                    </div>
+                );
+            }
+
+            const colors = ['var(--gradient-1)', 'var(--gradient-2)', 'var(--gradient-3)', 'var(--gradient-4)'];
+
+            return (
+                <div className="glass-card" style={{ padding: '24px' }}>
+                    <h3 style={{ fontSize: '16px', fontWeight: '600', marginBottom: '20px', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                        <span>🤖</span> Registered Agents
+                    </h3>
+                    <div style={{ display: 'grid', gap: '12px' }}>
+                        {agents.map((agent, idx) => (
+                            <div 
+                                key={agent.name}
+                                style={{
+                                    padding: '16px',
+                                    borderRadius: '12px',
+                                    background: 'rgba(255,255,255,0.03)',
+                                    border: '1px solid var(--border-glass)',
+                                    display: 'flex',
+                                    alignItems: 'center',
+                                    gap: '16px',
+                                    transition: 'all 0.3s ease'
+                                }}
+                            >
+                                <div 
+                                    className="agent-node"
+                                    style={{ background: colors[idx % colors.length], flexShrink: 0 }}
+                                >
+                                    {agent.name.charAt(0)}
+                                </div>
+                                <div style={{ flex: 1 }}>
+                                    <p style={{ fontWeight: '600', marginBottom: '4px' }}>{agent.name}</p>
+                                    <p style={{ fontSize: '12px', color: 'var(--text-muted)' }}>
+                                        {agent.deployment_name} • {agent.models?.join(', ')}
+                                    </p>
+                                </div>
+                                <div style={{ textAlign: 'right' }}>
+                                    <p style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>
+                                        {agent.activity?.active_task_ids?.length || 0} active
+                                    </p>
+                                    <p style={{ fontSize: '11px', color: 'var(--text-muted)' }}>
+                                        max: {agent.max_parallel_invocations}
+                                    </p>
+                                </div>
+                            </div>
+                        ))}
+                    </div>
+                </div>
+            );
+        }
+
+        function WorkloadStatus({ workload }) {
+            if (!workload?.length) return null;
+
+            return (
+                <div className="glass-card" style={{ padding: '24px' }}>
+                    <h3 style={{ fontSize: '16px', fontWeight: '600', marginBottom: '20px', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                        <span>☸️</span> Kubernetes Workloads
+                    </h3>
+                    <div style={{ display: 'grid', gap: '12px' }}>
+                        {workload.map(w => {
+                            const percentage = w.max_pods > 0 ? (w.live?.active_pods / w.max_pods) * 100 : 0;
+                            return (
+                                <div key={w.deployment_name} style={{ padding: '12px 0' }}>
+                                    <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px' }}>
+                                        <span style={{ fontWeight: '500' }}>{w.deployment_name}</span>
+                                        <span style={{ color: 'var(--text-secondary)', fontSize: '14px' }}>
+                                            {w.live?.active_pods || 0}/{w.max_pods} pods
+                                        </span>
+                                    </div>
+                                    <div style={{
+                                        height: '6px',
+                                        borderRadius: '3px',
+                                        background: 'rgba(255,255,255,0.1)',
+                                        overflow: 'hidden'
+                                    }}>
+                                        <div style={{
+                                            height: '100%',
+                                            width: `${percentage}%`,
+                                            background: percentage === 100 ? 'var(--gradient-4)' : 'var(--gradient-3)',
+                                            borderRadius: '3px',
+                                            transition: 'width 0.5s ease'
+                                        }} />
+                                    </div>
+                                </div>
+                            );
+                        })}
+                    </div>
+                </div>
+            );
+        }
+
+        function LLMUsage({ models }) {
+            if (!models?.length) return null;
+
+            return (
+                <div className="glass-card" style={{ padding: '24px' }}>
+                    <h3 style={{ fontSize: '16px', fontWeight: '600', marginBottom: '20px', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                        <span>🧠</span> LLM Models
+                    </h3>
+                    <div style={{ display: 'grid', gap: '16px' }}>
+                        {models.map(m => {
+                            const tpmPct = m.tpm_max > 0 ? (m.tpm / m.tpm_max) * 100 : 0;
+                            const rpmPct = m.rpm_max > 0 ? (m.rpm / m.rpm_max) * 100 : 0;
+                            return (
+                                <div key={m.model} style={{
+                                    padding: '16px',
+                                    borderRadius: '12px',
+                                    background: 'rgba(255,255,255,0.03)'
+                                }}>
+                                    <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '12px' }}>
+                                        <span style={{ fontWeight: '600' }}>{m.model}</span>
+                                        <span style={{
+                                            fontSize: '12px',
+                                            padding: '4px 8px',
+                                            borderRadius: '6px',
+                                            background: 'rgba(16, 185, 129, 0.2)',
+                                            color: 'var(--accent-green)'
+                                        }}>
+                                            {m.provider}
+                                        </span>
+                                    </div>
+                                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px' }}>
+                                        <div>
+                                            <p style={{ fontSize: '11px', color: 'var(--text-muted)', marginBottom: '4px' }}>
+                                                TPM: {m.tpm?.toLocaleString() || 0} / {m.tpm_max?.toLocaleString()}
+                                            </p>
+                                            <div style={{ height: '4px', borderRadius: '2px', background: 'rgba(255,255,255,0.1)' }}>
+                                                <div style={{
+                                                    height: '100%',
+                                                    width: `${Math.min(tpmPct, 100)}%`,
+                                                    background: tpmPct > 90 ? 'var(--accent-red)' : 'var(--accent-cyan)',
+                                                    borderRadius: '2px'
+                                                }} />
+                                            </div>
+                                        </div>
+                                        <div>
+                                            <p style={{ fontSize: '11px', color: 'var(--text-muted)', marginBottom: '4px' }}>
+                                                RPM: {m.rpm || 0} / {m.rpm_max}
+                                            </p>
+                                            <div style={{ height: '4px', borderRadius: '2px', background: 'rgba(255,255,255,0.1)' }}>
+                                                <div style={{
+                                                    height: '100%',
+                                                    width: `${Math.min(rpmPct, 100)}%`,
+                                                    background: rpmPct > 90 ? 'var(--accent-red)' : 'var(--accent-purple)',
+                                                    borderRadius: '2px'
+                                                }} />
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                            );
+                        })}
+                    </div>
+                </div>
+            );
+        }
+
+        function EventStream({ events }) {
+            const containerRef = useRef(null);
+
+            useEffect(() => {
+                if (containerRef.current) {
+                    containerRef.current.scrollTop = containerRef.current.scrollHeight;
+                }
+            }, [events]);
+
+            const getEventStyle = (event) => {
+                if (event.severity === 'error') return { color: 'var(--accent-red)', bg: 'rgba(239, 68, 68, 0.1)' };
+                if (event.event_type?.includes('handoff')) return { color: 'var(--accent-yellow)', bg: 'rgba(245, 158, 11, 0.1)' };
+                if (event.event_type?.includes('llm')) return { color: 'var(--accent-purple)', bg: 'rgba(139, 92, 246, 0.1)' };
+                if (event.event_type?.includes('tool')) return { color: 'var(--accent-cyan)', bg: 'rgba(6, 182, 212, 0.1)' };
+                return { color: 'var(--accent-green)', bg: 'rgba(16, 185, 129, 0.1)' };
+            };
+
+            return (
+                <div className="glass-card" style={{ padding: '24px', height: '100%' }}>
+                    <h3 style={{ fontSize: '16px', fontWeight: '600', marginBottom: '20px', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                        <span>📡</span> Live Events
+                        <span className="status-dot running" style={{ marginLeft: '8px' }}></span>
+                    </h3>
+                    <div 
+                        ref={containerRef}
+                        style={{
+                            height: '300px',
+                            overflowY: 'auto',
+                            fontFamily: 'ui-monospace, monospace',
+                            fontSize: '12px'
+                        }}
+                    >
+                        {events.length === 0 ? (
+                            <p style={{ color: 'var(--text-muted)', textAlign: 'center', padding: '40px' }}>
+                                Waiting for events...
+                            </p>
+                        ) : (
+                            events.map((event) => {
+                                const style = getEventStyle(event);
+                                return (
+                                    <div 
+                                        key={event._id}
+                                        className="animate-fade-in"
+                                        style={{
+                                            marginBottom: '8px',
+                                            padding: '10px 12px',
+                                            borderRadius: '8px',
+                                            background: style.bg,
+                                            borderLeft: `3px solid ${style.color}`
+                                        }}
+                                    >
+                                        <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '4px' }}>
+                                            <span style={{ color: style.color, fontWeight: '600' }}>
+                                                [{event.event_type}]
+                                            </span>
+                                            <span style={{ color: 'var(--text-muted)', fontSize: '10px' }}>
+                                                {new Date(event.timestamp).toLocaleTimeString()}
+                                            </span>
+                                        </div>
+                                        <p style={{ color: 'var(--text-secondary)' }}>{event.message}</p>
+                                        {event.agent_name && (
+                                            <span style={{
+                                                display: 'inline-block',
+                                                marginTop: '6px',
+                                                fontSize: '10px',
+                                                padding: '2px 8px',
+                                                borderRadius: '4px',
+                                                background: 'rgba(255,255,255,0.1)'
+                                            }}>
+                                                {event.agent_name}
+                                            </span>
+                                        )}
+                                    </div>
+                                );
+                            })
+                        )}
+                    </div>
+                </div>
+            );
+        }
+
+        function TracesList({ traces, onSelect, selected }) {
+            return (
+                <div className="glass-card" style={{ padding: '24px' }}>
+                    <h3 style={{ fontSize: '16px', fontWeight: '600', marginBottom: '20px', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                        <span>🔍</span> Recent Traces
+                    </h3>
+                    <div style={{ maxHeight: '400px', overflowY: 'auto' }}>
+                        {traces.length === 0 ? (
+                            <p style={{ color: 'var(--text-muted)', textAlign: 'center', padding: '20px' }}>
+                                No traces yet
+                            </p>
+                        ) : (
+                            traces.map(trace => (
+                                <div
+                                    key={trace.trace_id}
+                                    onClick={() => onSelect(trace)}
+                                    style={{
+                                        padding: '16px',
+                                        marginBottom: '8px',
+                                        borderRadius: '12px',
+                                        background: selected?.trace_id === trace.trace_id 
+                                            ? 'rgba(59, 130, 246, 0.2)' 
+                                            : 'rgba(255,255,255,0.03)',
+                                        border: selected?.trace_id === trace.trace_id 
+                                            ? '1px solid var(--accent-blue)' 
+                                            : '1px solid transparent',
+                                        cursor: 'pointer',
+                                        transition: 'all 0.2s ease'
+                                    }}
+                                >
+                                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
+                                        <span style={{ fontFamily: 'monospace', color: 'var(--accent-cyan)', fontSize: '13px' }}>
+                                            {trace.trace_id?.slice(0, 8)}...
+                                        </span>
+                                        <span style={{
+                                            padding: '4px 10px',
+                                            borderRadius: '6px',
+                                            fontSize: '11px',
+                                            fontWeight: '600',
+                                            background: trace.status === 'completed' ? 'rgba(16, 185, 129, 0.2)' :
+                                                       trace.status === 'failed' ? 'rgba(239, 68, 68, 0.2)' :
+                                                       'rgba(245, 158, 11, 0.2)',
+                                            color: trace.status === 'completed' ? 'var(--accent-green)' :
+                                                  trace.status === 'failed' ? 'var(--accent-red)' :
+                                                  'var(--accent-yellow)'
+                                        }}>
+                                            {trace.status}
+                                        </span>
+                                    </div>
+                                    <p style={{ fontSize: '13px', color: 'var(--text-secondary)', marginBottom: '8px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                                        {trace.user_input || 'No input'}
+                                    </p>
+                                    <div style={{ display: 'flex', gap: '16px', fontSize: '11px', color: 'var(--text-muted)' }}>
+                                        <span>🤖 {trace.agent_count || 0}</span>
+                                        <span>💬 {trace.llm_call_count || 0}</span>
+                                        <span>⏱️ {(trace.total_duration_ms || 0).toFixed(0)}ms</span>
+                                        <span>🔤 {(trace.total_tokens || 0).toLocaleString()}</span>
+                                    </div>
+                                </div>
+                            ))
+                        )}
+                    </div>
+                </div>
+            );
+        }
+
+        // Main Dashboard
+        function Dashboard() {
+            const clientId = useRef(`dashboard-${Date.now()}`).current;
+            const { events, connected } = useWebSocket(clientId);
+            const { state: oracleState, refresh: refreshOracle } = useOracleState();
+            const [traces, setTraces] = useState([]);
+            const [selectedTrace, setSelectedTrace] = useState(null);
+
+            const fetchTraces = useCallback(async () => {
+                try {
+                    const res = await fetch(`${API_BASE}/api/v1/traces?limit=20`);
+                    const data = await res.json();
+                    setTraces(data.traces || []);
+                } catch (e) {
+                    console.error('Failed to fetch traces:', e);
+                }
+            }, []);
+
+            useEffect(() => {
+                fetchTraces();
+                const interval = setInterval(fetchTraces, 5000);
+                return () => clearInterval(interval);
+            }, [fetchTraces]);
+
+            const handleSimulate = async () => {
+                try {
+                    await fetch(`${API_BASE}/api/v1/debug/simulate-trace`, { method: 'POST' });
+                    fetchTraces();
+                    refreshOracle();
+                } catch (e) {
+                    console.error('Failed to simulate:', e);
+                }
+            };
+
+            return (
+                <div style={{ minHeight: '100vh' }}>
+                    <Header connected={connected} onSimulate={handleSimulate} />
+                    
+                    <main style={{ padding: '24px 32px' }}>
+                        <SystemStatus oracleState={oracleState} />
+                        
+                        <div style={{
+                            display: 'grid',
+                            gridTemplateColumns: '1fr 1fr 1fr',
+                            gap: '24px',
+                            marginBottom: '24px'
+                        }}>
+                            <AgentsList agents={oracleState?.agents} />
+                            <WorkloadStatus workload={oracleState?.workload} />
+                            <LLMUsage models={oracleState?.litellm} />
+                        </div>
+                        
+                        <div style={{
+                            display: 'grid',
+                            gridTemplateColumns: '1fr 1fr',
+                            gap: '24px'
+                        }}>
+                            <TracesList 
+                                traces={traces} 
+                                selected={selectedTrace}
+                                onSelect={setSelectedTrace}
+                            />
+                            <EventStream events={events} />
+                        </div>
+                    </main>
+                    
+                    <footer style={{
+                        padding: '20px 32px',
+                        borderTop: '1px solid var(--border-glass)',
+                        textAlign: 'center',
+                        color: 'var(--text-muted)',
+                        fontSize: '13px'
+                    }}>
+                        Oracle Monitor • Multi-Agent Telemetry System • Built for Claude Code
+                    </footer>
+                </div>
+            );
+        }
+
+        // Render
+        ReactDOM.createRoot(document.getElementById('root')).render(<Dashboard />);
+    </script>
+</body>
+</html>

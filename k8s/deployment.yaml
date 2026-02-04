@@ -1,0 +1,241 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: telemetry
+---
+# Kafka StatefulSet
+apiVersion: v1
+kind: Service
+metadata:
+  name: kafka
+  namespace: telemetry
+spec:
+  ports:
+    - port: 9092
+      name: client
+    - port: 9093
+      name: internal
+  clusterIP: None
+  selector:
+    app: kafka
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: kafka
+  namespace: telemetry
+spec:
+  serviceName: kafka
+  replicas: 1
+  selector:
+    matchLabels:
+      app: kafka
+  template:
+    metadata:
+      labels:
+        app: kafka
+    spec:
+      containers:
+        - name: kafka
+          image: apache/kafka:latest
+          ports:
+            - containerPort: 9092
+            - containerPort: 9093
+          env:
+            - name: KAFKA_NODE_ID
+              value: "1"
+            - name: KAFKA_PROCESS_ROLES
+              value: "broker,controller"
+            - name: KAFKA_LISTENERS
+              value: "PLAINTEXT://:9092,CONTROLLER://:9093"
+            - name: KAFKA_ADVERTISED_LISTENERS
+              value: "PLAINTEXT://kafka:9092"
+            - name: KAFKA_LISTENER_SECURITY_PROTOCOL_MAP
+              value: "CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT"
+            - name: KAFKA_CONTROLLER_QUORUM_VOTERS
+              value: "1@localhost:9093"
+            - name: KAFKA_CONTROLLER_LISTENER_NAMES
+              value: "CONTROLLER"
+            - name: KAFKA_INTER_BROKER_LISTENER_NAME
+              value: "PLAINTEXT"
+            - name: KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR
+              value: "1"
+            - name: KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR
+              value: "1"
+            - name: KAFKA_TRANSACTION_STATE_LOG_MIN_ISR
+              value: "1"
+            - name: KAFKA_AUTO_CREATE_TOPICS_ENABLE
+              value: "true"
+          volumeMounts:
+            - name: kafka-data
+              mountPath: /tmp/kraft-combined-logs
+  volumeClaimTemplates:
+    - metadata:
+        name: kafka-data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 1Gi
+---
+# Ollama for local LLM
+apiVersion: v1
+kind: Service
+metadata:
+  name: ollama
+  namespace: telemetry
+spec:
+  ports:
+    - port: 11434
+      targetPort: 11434
+  selector:
+    app: ollama
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ollama
+  namespace: telemetry
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ollama
+  template:
+    metadata:
+      labels:
+        app: ollama
+    spec:
+      containers:
+        - name: ollama
+          image: ollama/ollama:latest
+          ports:
+            - containerPort: 11434
+          volumeMounts:
+            - name: ollama-data
+              mountPath: /root/.ollama
+          resources:
+            requests:
+              memory: "2Gi"
+              cpu: "1"
+            limits:
+              memory: "4Gi"
+              cpu: "2"
+      volumes:
+        - name: ollama-data
+          emptyDir: {}
+---
+# Telemetry API Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: telemetry-api
+  namespace: telemetry
+spec:
+  type: NodePort
+  ports:
+    - port: 8080
+      targetPort: 8080
+      nodePort: 30080
+  selector:
+    app: telemetry-api
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: telemetry-api
+  namespace: telemetry
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: telemetry-api
+  template:
+    metadata:
+      labels:
+        app: telemetry-api
+    spec:
+      containers:
+        - name: telemetry-api
+          image: telemetry-api:latest
+          imagePullPolicy: Never
+          ports:
+            - containerPort: 8080
+          env:
+            - name: KAFKA_BOOTSTRAP_SERVERS
+              value: "kafka:9092"
+            - name: OLLAMA_BASE_URL
+              value: "http://ollama:11434"
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "100m"
+            limits:
+              memory: "512Mi"
+              cpu: "500m"
+---
+# Dashboard Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: telemetry-dashboard
+  namespace: telemetry
+spec:
+  type: NodePort
+  ports:
+    - port: 80
+      targetPort: 80
+      nodePort: 30081
+  selector:
+    app: telemetry-dashboard
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: telemetry-dashboard
+  namespace: telemetry
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: telemetry-dashboard
+  template:
+    metadata:
+      labels:
+        app: telemetry-dashboard
+    spec:
+      containers:
+        - name: dashboard
+          image: nginx:alpine
+          ports:
+            - containerPort: 80
+          volumeMounts:
+            - name: dashboard-content
+              mountPath: /usr/share/nginx/html
+      volumes:
+        - name: dashboard-content
+          configMap:
+            name: dashboard-config
+---
+# Multi-Agent Demo
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: multi-agent-demo
+  namespace: telemetry
+spec:
+  template:
+    spec:
+      containers:
+        - name: demo
+          image: telemetry-demo:latest
+          imagePullPolicy: Never
+          env:
+            - name: KAFKA_BOOTSTRAP_SERVERS
+              value: "kafka:9092"
+            - name: OLLAMA_BASE_URL
+              value: "http://ollama:11434"
+            - name: LITELLM_LOG
+              value: "DEBUG"
+      restartPolicy: Never
+  backoffLimit: 4

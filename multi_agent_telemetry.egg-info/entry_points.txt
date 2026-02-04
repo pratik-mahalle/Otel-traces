@@ -1,0 +1,3 @@
+[console_scripts]
+oracle-monitor = src.oracle.cli:main
+telemetry-api = src.api.service:main

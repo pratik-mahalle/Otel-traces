@@ -1,0 +1,61 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "multi-agent-telemetry"
+version = "1.0.0"
+description = "Multi-Agent Telemetry System for debugging with Claude Code"
+readme = "README.md"
+requires-python = ">=3.9"
+license = {text = "MIT"}
+authors = [
+    {name = "Priyesh Srivastava", email = "priyesh@onfinance.ai"}
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+]
+dependencies = [
+    "fastapi>=0.104.0",
+    "uvicorn[standard]>=0.24.0",
+    "pydantic>=2.5.0",
+    "aiokafka>=0.10.0",
+    "kafka-python>=2.0.2",
+    "litellm>=1.20.0",
+    "openai>=1.6.0",
+    "aiohttp>=3.9.0",
+    "httpx>=0.25.0",
+    "python-dotenv>=1.0.0",
+    "structlog>=23.2.0",
+    "kubernetes>=28.1.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4.0",
+    "pytest-asyncio>=0.21.0",
+    "pytest-cov>=4.1.0",
+]
+
+[project.scripts]
+oracle-monitor = "src.oracle.cli:main"
+telemetry-api = "src.api.service:main"
+
+[project.urls]
+Homepage = "https://github.com/onfinance/multi-agent-telemetry"
+Documentation = "https://github.com/onfinance/multi-agent-telemetry#readme"
+Repository = "https://github.com/onfinance/multi-agent-telemetry.git"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["src*"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]

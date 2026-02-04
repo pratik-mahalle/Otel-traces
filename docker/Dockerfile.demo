@@ -1,0 +1,26 @@
+# Dockerfile for Multi-Agent Demo
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# Install dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Python dependencies
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy application code
+COPY src/ ./src/
+COPY __init__.py .
+COPY demo.py .
+
+# Set environment variables
+ENV PYTHONUNBUFFERED=1
+ENV KAFKA_BOOTSTRAP_SERVERS=kafka:9092
+ENV OLLAMA_BASE_URL=http://ollama:11434
+
+# Run the demo
+CMD ["python", "demo.py"]

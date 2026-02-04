@@ -1,0 +1,26 @@
+# Kind cluster configuration for multi-agent telemetry
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: telemetry-cluster
+nodes:
+  - role: control-plane
+    kubeadmConfigPatches:
+      - |
+        kind: InitConfiguration
+        nodeRegistration:
+          kubeletExtraArgs:
+            node-labels: "ingress-ready=true"
+    extraPortMappings:
+      - containerPort: 30080
+        hostPort: 8080
+        protocol: TCP
+      - containerPort: 30081
+        hostPort: 8081
+        protocol: TCP
+      - containerPort: 30092
+        hostPort: 9092
+        protocol: TCP
+  - role: worker
+    extraMounts:
+      - hostPath: /tmp/ollama-models
+        containerPath: /ollama-models
