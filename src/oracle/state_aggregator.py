@@ -475,71 +475,351 @@ class TelemetryStoreCollector:
 
 
 class LiteLLMCollector:
-    """Collects LLM model state and usage"""
-    
-    def __init__(self, ollama_url: str = "http://localhost:11434", allow_mocks: bool = True):
+    """
+    Collects LLM model state and usage from multiple providers.
+
+    Supports:
+    - Ollama (local)
+    - OpenAI
+    - Anthropic
+    - Azure OpenAI
+    - Any provider via LITELLM_PROVIDERS env var
+
+    Provider configuration via environment:
+    - OLLAMA_BASE_URL: Ollama API endpoint
+    - OPENAI_API_KEY: Enables OpenAI models
+    - ANTHROPIC_API_KEY: Enables Anthropic models
+    - AZURE_API_KEY + AZURE_API_BASE: Enables Azure OpenAI
+    - LITELLM_PROVIDERS: JSON list of custom providers
+    """
+
+    # Known provider rate limits (defaults, can be overridden)
+    PROVIDER_LIMITS = {
+        "openai": {
+            "gpt-4": {"tpm_max": 40000, "rpm_max": 200},
+            "gpt-4-turbo": {"tpm_max": 150000, "rpm_max": 500},
+            "gpt-4o": {"tpm_max": 150000, "rpm_max": 500},
+            "gpt-3.5-turbo": {"tpm_max": 90000, "rpm_max": 3500},
+        },
+        "anthropic": {
+            "claude-3-opus": {"tpm_max": 80000, "rpm_max": 40},
+            "claude-3-sonnet": {"tpm_max": 80000, "rpm_max": 40},
+            "claude-3-5-sonnet": {"tpm_max": 80000, "rpm_max": 50},
+            "claude-3-haiku": {"tpm_max": 100000, "rpm_max": 50},
+        },
+        "ollama": {
+            "default": {"tpm_max": 100000, "rpm_max": 1000},  # No real limits
+        },
+        "azure": {
+            "default": {"tpm_max": 120000, "rpm_max": 720},
+        }
+    }
+
+    def __init__(
+        self,
+        ollama_url: str = "http://localhost:11434",
+        allow_mocks: bool = True,
+        api_url: str = "http://localhost:8080"
+    ):
         self.ollama_url = ollama_url
         self.allow_mocks = allow_mocks
-    
+        self.api_url = api_url
+
+        # Detect configured providers from environment
+        self.providers = self._detect_providers()
+
+    def _detect_providers(self) -> Dict[str, Dict[str, Any]]:
+        """Detect which LLM providers are configured"""
+        providers = {}
+
+        # Ollama (always check, it's local)
+        providers["ollama"] = {
+            "url": self.ollama_url,
+            "payment_type": PaymentType.FREE
+        }
+
+        # OpenAI
+        if os.getenv("OPENAI_API_KEY"):
+            providers["openai"] = {
+                "url": "https://api.openai.com/v1",
+                "payment_type": PaymentType.PAY_PER_TOKEN
+            }
+
+        # Anthropic
+        if os.getenv("ANTHROPIC_API_KEY"):
+            providers["anthropic"] = {
+                "url": "https://api.anthropic.com",
+                "payment_type": PaymentType.PAY_PER_TOKEN
+            }
+
+        # Azure OpenAI
+        if os.getenv("AZURE_API_KEY") and os.getenv("AZURE_API_BASE"):
+            providers["azure"] = {
+                "url": os.getenv("AZURE_API_BASE"),
+                "payment_type": PaymentType.PAY_PER_TOKEN
+            }
+
+        # Custom providers from LITELLM_PROVIDERS env var
+        custom_providers = os.getenv("LITELLM_PROVIDERS")
+        if custom_providers:
+            try:
+                custom = json.loads(custom_providers)
+                for p in custom:
+                    providers[p["name"]] = {
+                        "url": p.get("url", ""),
+                        "payment_type": PaymentType(p.get("payment_type", "pay_per_token")),
+                        "models": p.get("models", [])
+                    }
+            except Exception as e:
+                logger.warning(f"Could not parse LITELLM_PROVIDERS: {e}")
+
+        logger.info(f"Detected LLM providers: {list(providers.keys())}")
+        return providers
+
     async def get_models(self) -> List[LiteLLMModel]:
-        """Get LLM model configurations and current usage"""
+        """Get LLM model configurations from all providers"""
         models = []
-        
-        # Try to get Ollama models
+
+        # Collect from each provider
+        for provider_name, config in self.providers.items():
+            try:
+                if provider_name == "ollama":
+                    models.extend(await self._get_ollama_models())
+                elif provider_name == "openai":
+                    models.extend(self._get_openai_models())
+                elif provider_name == "anthropic":
+                    models.extend(self._get_anthropic_models())
+                elif provider_name == "azure":
+                    models.extend(self._get_azure_models())
+                else:
+                    # Custom provider with pre-configured models
+                    for model_name in config.get("models", []):
+                        models.append(LiteLLMModel(
+                            model=f"{provider_name}/{model_name}",
+                            provider=provider_name,
+                            tpm=0,
+                            rpm=0,
+                            tpm_max=100000,
+                            rpm_max=1000,
+                            payment_type=config.get("payment_type", PaymentType.PAY_PER_TOKEN),
+                            input_types=["text"],
+                            output_types=["text"]
+                        ))
+            except Exception as e:
+                logger.debug(f"Could not fetch {provider_name} models: {e}")
+
+        # Also get models from telemetry (what agents are actually using)
+        telemetry_models = await self._get_models_from_telemetry()
+        for tm in telemetry_models:
+            # Add if not already present
+            if not any(m.model == tm.model for m in models):
+                models.append(tm)
+
+        # Fallback to mocks if no models found
+        if not models and self.allow_mocks:
+            models = self._get_mock_models()
+
+        return models
+
+    async def _get_ollama_models(self) -> List[LiteLLMModel]:
+        """Fetch models from Ollama API"""
+        models = []
         try:
             import httpx
             async with httpx.AsyncClient(timeout=5.0) as client:
                 response = await client.get(f"{self.ollama_url}/api/tags")
                 ollama_models = response.json().get("models", [])
-                
+
                 for model in ollama_models:
+                    model_name = model['name']
+                    limits = self.PROVIDER_LIMITS["ollama"].get(
+                        model_name,
+                        self.PROVIDER_LIMITS["ollama"]["default"]
+                    )
                     models.append(LiteLLMModel(
-                        model=f"ollama/{model['name']}",
+                        model=f"ollama/{model_name}",
                         provider="ollama",
                         tpm=0,
                         rpm=0,
-                        tpm_max=100000,  # No real limit for Ollama
-                        rpm_max=1000,
+                        tpm_max=limits["tpm_max"],
+                        rpm_max=limits["rpm_max"],
                         payment_type=PaymentType.FREE,
                         input_types=["text"],
                         output_types=["text"]
                     ))
         except Exception as e:
             logger.debug(f"Could not fetch Ollama models: {e}")
-        
-        # Add default models if none found
-        if not models:
-            if self.allow_mocks:
-                models = [
-                    LiteLLMModel(
-                        model="ollama/llama2",
-                        provider="ollama",
-                        tpm=0,
-                        rpm=0,
-                        tpm_max=100000,
-                        rpm_max=1000,
-                        payment_type=PaymentType.FREE,
-                        input_context=4096,
-                        output_context=4096,
-                        input_types=["text"],
-                        output_types=["text"]
-                    ),
-                    LiteLLMModel(
-                        model="ollama/mistral",
-                        provider="ollama",
-                        tpm=0,
-                        rpm=0,
-                        tpm_max=100000,
-                        rpm_max=1000,
-                        payment_type=PaymentType.FREE,
-                        input_context=8192,
-                        output_context=8192,
-                        input_types=["text"],
-                        output_types=["text"]
-                    )
-                ]
-        
         return models
+
+    def _get_openai_models(self) -> List[LiteLLMModel]:
+        """Get known OpenAI models (API key present)"""
+        models = []
+        for model_name, limits in self.PROVIDER_LIMITS["openai"].items():
+            models.append(LiteLLMModel(
+                model=f"openai/{model_name}",
+                provider="openai",
+                tpm=0,
+                rpm=0,
+                tpm_max=limits["tpm_max"],
+                rpm_max=limits["rpm_max"],
+                payment_type=PaymentType.PAY_PER_TOKEN,
+                input_types=["text"],
+                output_types=["text"]
+            ))
+        return models
+
+    def _get_anthropic_models(self) -> List[LiteLLMModel]:
+        """Get known Anthropic models (API key present)"""
+        models = []
+        for model_name, limits in self.PROVIDER_LIMITS["anthropic"].items():
+            models.append(LiteLLMModel(
+                model=f"anthropic/{model_name}",
+                provider="anthropic",
+                tpm=0,
+                rpm=0,
+                tpm_max=limits["tpm_max"],
+                rpm_max=limits["rpm_max"],
+                payment_type=PaymentType.PAY_PER_TOKEN,
+                input_types=["text"],
+                output_types=["text"]
+            ))
+        return models
+
+    def _get_azure_models(self) -> List[LiteLLMModel]:
+        """Get Azure OpenAI models"""
+        # Azure deployments are custom, return a placeholder
+        limits = self.PROVIDER_LIMITS["azure"]["default"]
+        return [LiteLLMModel(
+            model="azure/deployment",
+            provider="azure",
+            tpm=0,
+            rpm=0,
+            tpm_max=limits["tpm_max"],
+            rpm_max=limits["rpm_max"],
+            payment_type=PaymentType.PAY_PER_TOKEN,
+            input_types=["text"],
+            output_types=["text"]
+        )]
+
+    async def _get_models_from_telemetry(self) -> List[LiteLLMModel]:
+        """
+        Discover models from telemetry data.
+        This captures models that agents are actually using.
+        """
+        models = []
+        try:
+            import httpx
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                # Get recent spans to see what models are being used
+                response = await client.get(f"{self.api_url}/api/v1/traces?limit=100")
+                traces = response.json().get("traces", [])
+
+                seen_models: Set[str] = set()
+                for trace in traces:
+                    # Get spans for model info
+                    try:
+                        span_response = await client.get(
+                            f"{self.api_url}/api/v1/traces/{trace['trace_id']}/spans"
+                        )
+                        spans = span_response.json().get("spans", [])
+
+                        for span in spans:
+                            model_name = span.get("model_name")
+                            if model_name and model_name not in seen_models:
+                                seen_models.add(model_name)
+                                # Infer provider from model name
+                                provider = self._infer_provider(model_name)
+                                limits = self._get_limits_for_model(model_name, provider)
+
+                                models.append(LiteLLMModel(
+                                    model=model_name,
+                                    provider=provider,
+                                    tpm=0,
+                                    rpm=0,
+                                    tpm_max=limits["tpm_max"],
+                                    rpm_max=limits["rpm_max"],
+                                    payment_type=PaymentType.PAY_PER_TOKEN if provider != "ollama" else PaymentType.FREE,
+                                    input_types=["text"],
+                                    output_types=["text"]
+                                ))
+                    except Exception:
+                        pass  # Skip individual trace errors
+
+        except Exception as e:
+            logger.debug(f"Could not fetch models from telemetry: {e}")
+
+        return models
+
+    def _infer_provider(self, model_name: str) -> str:
+        """Infer provider from model name"""
+        model_lower = model_name.lower()
+        if "/" in model_name:
+            return model_name.split("/")[0]
+        if "gpt" in model_lower:
+            return "openai"
+        if "claude" in model_lower:
+            return "anthropic"
+        if "llama" in model_lower or "mistral" in model_lower:
+            return "ollama"
+        return "unknown"
+
+    def _get_limits_for_model(self, model_name: str, provider: str) -> Dict[str, int]:
+        """Get rate limits for a model"""
+        # Try exact match first
+        provider_limits = self.PROVIDER_LIMITS.get(provider, {})
+        for name, limits in provider_limits.items():
+            if name in model_name.lower():
+                return limits
+
+        # Return defaults
+        if provider in self.PROVIDER_LIMITS:
+            return self.PROVIDER_LIMITS[provider].get("default", {"tpm_max": 100000, "rpm_max": 1000})
+
+        return {"tpm_max": 100000, "rpm_max": 1000}
+
+    def _get_mock_models(self) -> List[LiteLLMModel]:
+        """Return mock model data for testing"""
+        return [
+            LiteLLMModel(
+                model="ollama/llama2",
+                provider="ollama",
+                tpm=0,
+                rpm=0,
+                tpm_max=100000,
+                rpm_max=1000,
+                payment_type=PaymentType.FREE,
+                input_context=4096,
+                output_context=4096,
+                input_types=["text"],
+                output_types=["text"]
+            ),
+            LiteLLMModel(
+                model="openai/gpt-4",
+                provider="openai",
+                tpm=0,
+                rpm=0,
+                tpm_max=40000,
+                rpm_max=200,
+                payment_type=PaymentType.PAY_PER_TOKEN,
+                input_context=128000,
+                output_context=4096,
+                input_types=["text"],
+                output_types=["text"]
+            ),
+            LiteLLMModel(
+                model="anthropic/claude-3-5-sonnet",
+                provider="anthropic",
+                tpm=0,
+                rpm=0,
+                tpm_max=80000,
+                rpm_max=50,
+                payment_type=PaymentType.PAY_PER_TOKEN,
+                input_context=200000,
+                output_context=4096,
+                input_types=["text"],
+                output_types=["text"]
+            )
+        ]
 
 
 def _get_discovery_mode() -> DiscoveryMode:
@@ -591,7 +871,11 @@ class OracleMonitorAggregator:
             discovery_mode=self.discovery_mode
         )
         self.telemetry_collector = TelemetryStoreCollector(api_url, allow_mocks=self.allow_mocks)
-        self.litellm_collector = LiteLLMCollector(ollama_url, allow_mocks=self.allow_mocks)
+        self.litellm_collector = LiteLLMCollector(
+            ollama_url,
+            allow_mocks=self.allow_mocks,
+            api_url=api_url
+        )
         
         self._previous_state: Optional[OracleMonitorState] = None
     

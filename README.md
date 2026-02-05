@@ -465,14 +465,64 @@ ws.onmessage = (event) => {
 
 ## Environment Variables
 
+### Core Configuration
+
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `ORACLE_DISCOVERY_MODE` | `auto` | Agent discovery mode: `auto`, `labeled`, `all`, `telemetry` |
 | `ORACLE_STRICT_SCHEMA` | `true` | Output strict JSON schema |
 | `ORACLE_ALLOW_MOCKS` | `false` (prod) | Allow mock data when K8s unavailable |
 | `KAFKA_BOOTSTRAP_SERVERS` | `kafka:9092` | Kafka connection |
-| `OLLAMA_BASE_URL` | `http://ollama:11434` | Ollama API URL |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | - | OTLP export endpoint (optional) |
+
+### LLM Provider Configuration
+
+The system auto-detects LLM providers from environment variables:
+
+| Variable | Description |
+|----------|-------------|
+| `OLLAMA_BASE_URL` | Ollama API URL (default: `http://ollama:11434`) |
+| `OPENAI_API_KEY` | Enables OpenAI models (gpt-4, gpt-4o, etc.) |
+| `ANTHROPIC_API_KEY` | Enables Anthropic models (claude-3, etc.) |
+| `AZURE_API_KEY` + `AZURE_API_BASE` | Enables Azure OpenAI |
+| `LITELLM_PROVIDERS` | JSON config for custom providers |
+
+**Example: Enable multiple providers**
+```bash
+export OLLAMA_BASE_URL="http://ollama:11434"
+export OPENAI_API_KEY="sk-..."
+export ANTHROPIC_API_KEY="sk-ant-..."
+```
+
+**Custom providers via JSON:**
+```bash
+export LITELLM_PROVIDERS='[
+  {"name": "together", "url": "https://api.together.xyz", "models": ["llama-70b", "mistral-7b"]},
+  {"name": "groq", "url": "https://api.groq.com", "models": ["mixtral-8x7b"]}
+]'
+```
+
+### How LLM Tracking Works
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                       LLM MODEL DISCOVERY                           │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                      │
+│  1. Environment Detection                                           │
+│     OPENAI_API_KEY set? → Add OpenAI models                         │
+│     ANTHROPIC_API_KEY set? → Add Anthropic models                   │
+│     OLLAMA_BASE_URL? → Query Ollama API for models                  │
+│                                                                      │
+│  2. Telemetry Discovery                                             │
+│     Agent uses "gpt-4" → Auto-add to tracked models                 │
+│     Agent uses "claude-3" → Auto-add to tracked models              │
+│                                                                      │
+│  3. Unified View                                                    │
+│     GET /api/v1/oracle/llm → All models with rate limits            │
+│                                                                      │
+└─────────────────────────────────────────────────────────────────────┘
+```
 
 ---
 
