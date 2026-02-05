@@ -1,0 +1,95 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: agent-researcher
+  namespace: telemetry
+  labels:
+    app: agent-researcher
+    oracle-monitor/agent: "true"
+    oracle-monitor/name: "Researcher"
+  annotations:
+    oracle-monitor/description: "Sample research agent (telemetry emitter)"
+    oracle-monitor/models: "gpt-4o-mini,claude-3-5-sonnet"
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: agent-researcher
+  template:
+    metadata:
+      labels:
+        app: agent-researcher
+        oracle-monitor/agent: "true"
+        oracle-monitor/name: "Researcher"
+      annotations:
+        oracle-monitor/description: "Sample research agent (telemetry emitter)"
+        oracle-monitor/models: "gpt-4o-mini,claude-3-5-sonnet"
+    spec:
+      containers:
+        - name: agent
+          image: telemetry-api:latest
+          imagePullPolicy: Never
+          command: ["python", "-m", "src.agents.emit_telemetry"]
+          env:
+            - name: KAFKA_BOOTSTRAP_SERVERS
+              value: "kafka:9092"
+            - name: ENVIRONMENT
+              value: "production"
+            - name: AGENT_NAME
+              value: "Researcher"
+            - name: AGENT_ID
+              value: "researcher"
+            - name: TARGET_AGENT_NAME
+              value: "Writer"
+            - name: AGENT_WORK_SECONDS
+              value: "20"
+            - name: AGENT_INTERVAL_SECONDS
+              value: "10"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: agent-writer
+  namespace: telemetry
+  labels:
+    app: agent-writer
+    oracle-monitor/agent: "true"
+    oracle-monitor/name: "Writer"
+  annotations:
+    oracle-monitor/description: "Sample writing agent (telemetry emitter)"
+    oracle-monitor/models: "gpt-4o-mini,claude-3-5-sonnet"
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: agent-writer
+  template:
+    metadata:
+      labels:
+        app: agent-writer
+        oracle-monitor/agent: "true"
+        oracle-monitor/name: "Writer"
+      annotations:
+        oracle-monitor/description: "Sample writing agent (telemetry emitter)"
+        oracle-monitor/models: "gpt-4o-mini,claude-3-5-sonnet"
+    spec:
+      containers:
+        - name: agent
+          image: telemetry-api:latest
+          imagePullPolicy: Never
+          command: ["python", "-m", "src.agents.emit_telemetry"]
+          env:
+            - name: KAFKA_BOOTSTRAP_SERVERS
+              value: "kafka:9092"
+            - name: ENVIRONMENT
+              value: "production"
+            - name: AGENT_NAME
+              value: "Writer"
+            - name: AGENT_ID
+              value: "writer"
+            - name: TARGET_AGENT_NAME
+              value: "Researcher"
+            - name: AGENT_WORK_SECONDS
+              value: "20"
+            - name: AGENT_INTERVAL_SECONDS
+              value: "10"

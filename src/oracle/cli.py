@@ -33,6 +33,13 @@ class Colors:
     GRAY = '\033[90m'
 
 
+def _env_bool(name: str, default: bool) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
 def print_banner():
     """Print Oracle Monitor banner"""
     banner = f"""
@@ -55,7 +62,8 @@ async def cmd_state(args):
     state = await aggregator.get_state()
     
     if args.format == "json":
-        print(state.to_json(indent=2))
+        strict_output = _env_bool("ORACLE_STRICT_SCHEMA", True)
+        print(state.to_json(indent=2, strict=strict_output))
     elif args.format == "summary":
         summary = state.get_summary()
         print(f"\n{Colors.BOLD}System Summary{Colors.END}")
@@ -207,7 +215,8 @@ async def cmd_watch(args):
             print("\033[2J\033[H", end="")
             
             if args.format == "json":
-                print(state.to_json())
+                strict_output = _env_bool("ORACLE_STRICT_SCHEMA", True)
+                print(state.to_json(strict=strict_output))
             else:
                 print_banner()
                 print(state.to_diff_log())

@@ -23,6 +23,7 @@ pytest-cov>=4.1.0
 # Utilities
 python-dotenv>=1.0.0
 structlog>=23.2.0
+jsonschema>=4.21.1
 
 # Kubernetes (for Oracle Monitor)
 kubernetes>=28.1.0

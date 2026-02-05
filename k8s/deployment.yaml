@@ -3,6 +3,39 @@ kind: Namespace
 metadata:
   name: telemetry
 ---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: telemetry-api
+  namespace: telemetry
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: telemetry-api-reader
+  namespace: telemetry
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: telemetry-api-reader
+  namespace: telemetry
+subjects:
+  - kind: ServiceAccount
+    name: telemetry-api
+    namespace: telemetry
+roleRef:
+  kind: Role
+  name: telemetry-api-reader
+  apiGroup: rbac.authorization.k8s.io
+---
 # Kafka StatefulSet
 apiVersion: v1
 kind: Service
@@ -163,6 +196,7 @@ spec:
       labels:
         app: telemetry-api
     spec:
+      serviceAccountName: telemetry-api
       containers:
         - name: telemetry-api
           image: telemetry-api:latest
@@ -174,6 +208,12 @@ spec:
               value: "kafka:9092"
             - name: OLLAMA_BASE_URL
               value: "http://ollama:11434"
+            - name: ORACLE_ENV
+              value: "production"
+            - name: ORACLE_ALLOW_MOCKS
+              value: "false"
+            - name: ORACLE_STRICT_SCHEMA
+              value: "true"
           resources:
             requests:
               memory: "256Mi"
@@ -224,26 +264,3 @@ spec:
         - name: dashboard-content
           configMap:
             name: dashboard-config
----
-# Multi-Agent Demo
-apiVersion: batch/v1
-kind: Job
-metadata:
-  name: multi-agent-demo
-  namespace: telemetry
-spec:
-  template:
-    spec:
-      containers:
-        - name: demo
-          image: telemetry-demo:latest
-          imagePullPolicy: Never
-          env:
-            - name: KAFKA_BOOTSTRAP_SERVERS
-              value: "kafka:9092"
-            - name: OLLAMA_BASE_URL
-              value: "http://ollama:11434"
-            - name: LITELLM_LOG
-              value: "DEBUG"
-      restartPolicy: Never
-  backoffLimit: 4

@@ -124,14 +124,9 @@ build_images() {
     log_info "Building telemetry-api image..."
     docker build -f docker/Dockerfile.api -t telemetry-api:latest .
     
-    # Build demo image
-    log_info "Building telemetry-demo image..."
-    docker build -f docker/Dockerfile.demo -t telemetry-demo:latest .
-    
     # Load images into Kind cluster
     log_info "Loading images into Kind cluster..."
     kind load docker-image telemetry-api:latest --name telemetry-cluster
-    kind load docker-image telemetry-demo:latest --name telemetry-cluster
     
     log_success "Docker images built and loaded!"
 }
@@ -177,12 +172,19 @@ create_kafka_topics() {
         TOPICS=("agent-telemetry-spans" "agent-telemetry-traces" "agent-telemetry-events" "agent-telemetry-handoffs" "agent-telemetry-metrics" "agent-telemetry-errors")
         
         for topic in "${TOPICS[@]}"; do
-            kubectl -n telemetry exec "$KAFKA_POD" -- /opt/bitnami/kafka/bin/kafka-topics.sh \
-                --create --if-not-exists \
-                --topic "$topic" \
-                --bootstrap-server localhost:9092 \
-                --partitions 3 \
-                --replication-factor 1 || true
+            kubectl -n telemetry exec "$KAFKA_POD" -- sh -c "\
+if [ -x /opt/kafka/bin/kafka-topics.sh ]; then \
+  KAFKA_TOPICS_PATH=/opt/kafka/bin/kafka-topics.sh; \
+elif [ -x /opt/bitnami/kafka/bin/kafka-topics.sh ]; then \
+  KAFKA_TOPICS_PATH=/opt/bitnami/kafka/bin/kafka-topics.sh; \
+else \
+  echo 'kafka-topics.sh not found' >&2; exit 1; \
+fi; \
+\$KAFKA_TOPICS_PATH --create --if-not-exists \
+  --topic \"$topic\" \
+  --bootstrap-server localhost:9092 \
+  --partitions 3 \
+  --replication-factor 1" || true
         done
         
         log_success "Kafka topics created!"
@@ -239,7 +241,6 @@ print_access_info() {
     echo ""
     echo "Useful commands:"
     echo "  - View logs:  kubectl -n telemetry logs -f deployment/telemetry-api"
-    echo "  - Run demo:   kubectl -n telemetry apply -f k8s/deployment.yaml -l app=multi-agent-demo"
     echo "  - Check pods: kubectl -n telemetry get pods"
     echo ""
     echo "To test with Claude Code:"

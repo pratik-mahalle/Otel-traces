@@ -281,21 +281,27 @@ class OracleMonitorState:
     cluster_name: str = "telemetry-cluster"
     namespace: str = "telemetry"
     
-    def to_dict(self) -> Dict[str, Any]:
-        return {
+    def to_dict(self, strict: bool = False) -> Dict[str, Any]:
+        """
+        Convert to dict.
+        When strict is True, emit only fields defined in the public JSON schema.
+        """
+        result = {
             "id": self.id,
             "agents": [a.to_dict() for a in self.agents],
             "workload": [w.to_dict() for w in self.workload],
             "queues": [q.to_dict() for q in self.queues],
-            "litellm": [l.to_dict() for l in self.litellm],
-            "generated_at": self.generated_at.isoformat(),
-            "cluster_name": self.cluster_name,
-            "namespace": self.namespace
+            "litellm": [l.to_dict() for l in self.litellm]
         }
+        if not strict:
+            result["generated_at"] = self.generated_at.isoformat()
+            result["cluster_name"] = self.cluster_name
+            result["namespace"] = self.namespace
+        return result
     
-    def to_json(self, indent: int = 2) -> str:
+    def to_json(self, indent: int = 2, strict: bool = False) -> str:
         """Convert to JSON string"""
-        return json.dumps(self.to_dict(), indent=indent, default=str)
+        return json.dumps(self.to_dict(strict=strict), indent=indent, default=str)
     
     def get_summary(self) -> Dict[str, Any]:
         """Get a summary of the system state for quick debugging"""
@@ -410,18 +416,37 @@ ORACLE_MONITOR_SCHEMA = {
     "description": "Comprehensive state representation for multi-agent orchestration monitoring",
     "type": "object",
     "properties": {
-        "id": {"type": "string", "description": "Unique identifier for the system instance"},
+        "id": {
+            "type": "string",
+            "description": "Unique identifier for the system instance"
+        },
         "agents": {
             "type": "array",
             "description": "List of registered agents in the system",
             "items": {
                 "type": "object",
                 "properties": {
-                    "name": {"type": "string"},
-                    "description": {"type": "string"},
-                    "max_parallel_invocations": {"type": "integer"},
-                    "deployment_name": {"type": "string"},
-                    "models": {"type": "array", "items": {"type": "string"}},
+                    "name": {
+                        "type": "string",
+                        "description": "Agent identifier/name"
+                    },
+                    "description": {
+                        "type": "string",
+                        "description": "Human-readable description of agent's purpose"
+                    },
+                    "max_parallel_invocations": {
+                        "type": "integer",
+                        "description": "Maximum concurrent tasks this agent can handle"
+                    },
+                    "deployment_name": {
+                        "type": "string",
+                        "description": "Kubernetes deployment name for this agent"
+                    },
+                    "models": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "LLM models this agent is authorized to use"
+                    },
                     "activity": {
                         "type": "object",
                         "properties": {
@@ -447,15 +472,124 @@ ORACLE_MONITOR_SCHEMA = {
         },
         "workload": {
             "type": "array",
-            "description": "Kubernetes workload metrics per deployment"
+            "description": "Kubernetes workload metrics per deployment",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "deployment_name": {
+                        "type": "string",
+                        "description": "Kubernetes deployment name"
+                    },
+                    "max_pods": {
+                        "type": "integer",
+                        "description": "Maximum pods allowed for this deployment"
+                    },
+                    "live": {
+                        "type": "object",
+                        "properties": {
+                            "active_pods": {"type": "integer"},
+                            "updated_at": {"type": "string", "format": "date-time"},
+                            "image": {"type": "string"},
+                            "rolled_out_at": {"type": "string", "format": "date-time"}
+                        },
+                        "required": ["active_pods", "updated_at"]
+                    },
+                    "pod_max_ram": {
+                        "type": "string",
+                        "description": "Memory limit per pod (e.g., '2Gi')"
+                    },
+                    "pod_max_cpu": {
+                        "type": "string",
+                        "description": "CPU limit per pod (e.g., '1000m')"
+                    },
+                    "pods": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "pod_id": {"type": "string"},
+                                "cpu": {"type": "number", "description": "CPU usage in millicores"},
+                                "memory": {"type": "number", "description": "Memory usage in MB"},
+                                "network_in": {"type": "number", "description": "Network ingress bytes"},
+                                "network_out": {"type": "number", "description": "Network egress bytes"},
+                                "status": {"type": "string", "enum": ["Running", "Pending", "Failed", "Succeeded", "Unknown"]},
+                                "updated_at": {"type": "string", "format": "date-time"}
+                            },
+                            "required": ["pod_id", "cpu", "memory", "status"]
+                        }
+                    }
+                },
+                "required": ["deployment_name", "max_pods", "live", "pods"]
+            }
         },
         "queues": {
             "type": "array",
-            "description": "Task queues and their contents"
+            "description": "Task queues and their contents",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "Queue/topic name"
+                    },
+                    "tasks": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "id": {"type": "string"},
+                                "invoked_by": {"type": "string", "description": "Agent or system that submitted the task"},
+                                "priority": {
+                                    "type": "object",
+                                    "properties": {
+                                        "level": {"type": "string", "enum": ["low", "normal", "high", "critical"]},
+                                        "blocked_task": {"type": "string", "description": "Task ID this task is blocked by"},
+                                        "waiting_since_mins": {"type": "number", "description": "Minutes waiting in queue"}
+                                    },
+                                    "required": ["level"]
+                                },
+                                "prompt": {"type": "string", "description": "Task description or prompt"},
+                                "args": {"type": "object", "description": "Task arguments"},
+                                "submitted_at": {"type": "string", "format": "date-time"}
+                            },
+                            "required": ["id", "priority", "submitted_at"]
+                        }
+                    },
+                    "updated_at": {"type": "string", "format": "date-time"}
+                },
+                "required": ["name", "tasks", "updated_at"]
+            }
         },
         "litellm": {
             "type": "array",
-            "description": "LLM model configurations and usage"
+            "description": "LLM model configurations and usage",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "model": {"type": "string", "description": "Model identifier"},
+                    "provider": {"type": "string", "description": "Provider name (openai, anthropic, etc.)"},
+                    "tpm": {"type": "number", "description": "Current tokens per minute usage"},
+                    "rpm": {"type": "number", "description": "Current requests per minute usage"},
+                    "tpm_max": {"type": "number", "description": "Maximum tokens per minute limit"},
+                    "rpm_max": {"type": "number", "description": "Maximum requests per minute limit"},
+                    "credits": {"type": "number", "description": "Available credits/balance"},
+                    "payment_type": {"type": "string", "enum": ["prepaid", "postpaid", "free"]},
+                    "input_context": {"type": "integer", "description": "Maximum input context length"},
+                    "output_context": {"type": "integer", "description": "Maximum output context length"},
+                    "output_dim": {"type": "integer", "description": "Embedding output dimensions (if applicable)"},
+                    "input_types": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Supported input types (text, image, audio)"
+                    },
+                    "output_types": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Supported output types"
+                    }
+                },
+                "required": ["model", "provider", "tpm_max", "rpm_max"]
+            }
         }
     },
     "required": ["id", "agents", "workload", "queues", "litellm"]

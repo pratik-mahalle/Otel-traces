@@ -28,11 +28,20 @@ from .state_schema import (
 logger = logging.getLogger(__name__)
 
 
+def _env_bool(name: str, default: bool) -> bool:
+    """Parse a boolean env var with a default."""
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
 class KubernetesCollector:
     """Collects workload state from Kubernetes"""
     
-    def __init__(self, namespace: str = "telemetry"):
+    def __init__(self, namespace: str = "telemetry", allow_mocks: bool = True):
         self.namespace = namespace
+        self.allow_mocks = allow_mocks
         self._initialized = False
         
         if HAS_K8S:
@@ -53,7 +62,10 @@ class KubernetesCollector:
     async def get_workloads(self) -> List[WorkloadState]:
         """Get workload state for all deployments"""
         if not self._initialized:
-            return self._get_mock_workloads()
+            if self.allow_mocks:
+                return self._get_mock_workloads()
+            logger.warning("Kubernetes not initialized; returning empty workload list (mocks disabled)")
+            return []
         
         try:
             apps_v1 = client.AppsV1Api()
@@ -112,7 +124,9 @@ class KubernetesCollector:
             
         except Exception as e:
             logger.error(f"Error getting Kubernetes workloads: {e}")
-            return self._get_mock_workloads()
+            if self.allow_mocks:
+                return self._get_mock_workloads()
+            return []
     
     def _get_resource_limit(self, deployment, resource: str) -> Optional[str]:
         """Extract resource limit from deployment"""
@@ -139,11 +153,25 @@ class KubernetesCollector:
             
             discovered_agents = []
             for d in deployments.items:
-                name = d.metadata.labels.get("oracle-monitor/name") or d.metadata.name
-                desc = d.metadata.annotations.get("oracle-monitor/description", "Discovered k8s agent")
-                
-                # Try to guess used models from env vars if possible, or default
-                models = ["unknown"]
+                name = (
+                    d.metadata.labels.get("oracle-monitor/name")
+                    or d.metadata.annotations.get("oracle-monitor/name")
+                    or d.metadata.name
+                )
+                desc = (
+                    d.metadata.annotations.get("oracle-monitor/description")
+                    or d.metadata.labels.get("oracle-monitor/description")
+                    or "Discovered k8s agent"
+                )
+                model_list = (
+                    d.metadata.annotations.get("oracle-monitor/models")
+                    or d.metadata.labels.get("oracle-monitor/models")
+                )
+                if model_list:
+                    models = [m.strip() for m in model_list.split(",") if m.strip()]
+                else:
+                    # Default to unknown to satisfy schema requirements
+                    models = ["unknown"]
                 
                 discovered_agents.append(AgentState(
                     name=name,
@@ -213,8 +241,9 @@ class KubernetesCollector:
 class TelemetryStoreCollector:
     """Collects agent and queue state from the telemetry store"""
     
-    def __init__(self, api_url: str = "http://localhost:8080"):
+    def __init__(self, api_url: str = "http://localhost:8080", allow_mocks: bool = True):
         self.api_url = api_url
+        self.allow_mocks = allow_mocks
     
     async def get_agents(self) -> List[AgentState]:
         """Get agent state from telemetry data"""
@@ -263,7 +292,9 @@ class TelemetryStoreCollector:
                 
         except Exception as e:
             logger.warning(f"Error fetching from telemetry API: {e}")
-            return self._get_mock_agents()
+            if self.allow_mocks:
+                return self._get_mock_agents()
+            return []
     
     def _get_mock_agents(self) -> List[AgentState]:
         """Return mock agent data for testing"""
@@ -312,6 +343,8 @@ class TelemetryStoreCollector:
     
     async def get_queues(self) -> List[QueueState]:
         """Get queue state (simulated from Kafka topics)"""
+        if not self.allow_mocks:
+            return []
         # In production, this would query Kafka consumer lag
         return [
             QueueState(
@@ -343,8 +376,9 @@ class TelemetryStoreCollector:
 class LiteLLMCollector:
     """Collects LLM model state and usage"""
     
-    def __init__(self, ollama_url: str = "http://localhost:11434"):
+    def __init__(self, ollama_url: str = "http://localhost:11434", allow_mocks: bool = True):
         self.ollama_url = ollama_url
+        self.allow_mocks = allow_mocks
     
     async def get_models(self) -> List[LiteLLMModel]:
         """Get LLM model configurations and current usage"""
@@ -374,34 +408,35 @@ class LiteLLMCollector:
         
         # Add default models if none found
         if not models:
-            models = [
-                LiteLLMModel(
-                    model="ollama/llama2",
-                    provider="ollama",
-                    tpm=0,
-                    rpm=0,
-                    tpm_max=100000,
-                    rpm_max=1000,
-                    payment_type=PaymentType.FREE,
-                    input_context=4096,
-                    output_context=4096,
-                    input_types=["text"],
-                    output_types=["text"]
-                ),
-                LiteLLMModel(
-                    model="ollama/mistral",
-                    provider="ollama",
-                    tpm=0,
-                    rpm=0,
-                    tpm_max=100000,
-                    rpm_max=1000,
-                    payment_type=PaymentType.FREE,
-                    input_context=8192,
-                    output_context=8192,
-                    input_types=["text"],
-                    output_types=["text"]
-                )
-            ]
+            if self.allow_mocks:
+                models = [
+                    LiteLLMModel(
+                        model="ollama/llama2",
+                        provider="ollama",
+                        tpm=0,
+                        rpm=0,
+                        tpm_max=100000,
+                        rpm_max=1000,
+                        payment_type=PaymentType.FREE,
+                        input_context=4096,
+                        output_context=4096,
+                        input_types=["text"],
+                        output_types=["text"]
+                    ),
+                    LiteLLMModel(
+                        model="ollama/mistral",
+                        provider="ollama",
+                        tpm=0,
+                        rpm=0,
+                        tpm_max=100000,
+                        rpm_max=1000,
+                        payment_type=PaymentType.FREE,
+                        input_context=8192,
+                        output_context=8192,
+                        input_types=["text"],
+                        output_types=["text"]
+                    )
+                ]
         
         return models
 
@@ -416,14 +451,65 @@ class OracleMonitorAggregator:
         self,
         namespace: str = "telemetry",
         api_url: str = "http://localhost:8080",
-        ollama_url: str = "http://localhost:11434"
+        ollama_url: str = "http://localhost:11434",
+        allow_mocks: Optional[bool] = None
     ):
         self.namespace = namespace
-        self.k8s_collector = KubernetesCollector(namespace)
-        self.telemetry_collector = TelemetryStoreCollector(api_url)
-        self.litellm_collector = LiteLLMCollector(ollama_url)
+        if allow_mocks is None:
+            env = (os.getenv("ORACLE_ENV") or os.getenv("ENVIRONMENT") or os.getenv("ENV") or "development").lower()
+            default_allow_mocks = env not in {"production", "prod"}
+            allow_mocks = _env_bool("ORACLE_ALLOW_MOCKS", default_allow_mocks)
+        self.allow_mocks = allow_mocks
+        self.k8s_collector = KubernetesCollector(namespace, allow_mocks=self.allow_mocks)
+        self.telemetry_collector = TelemetryStoreCollector(api_url, allow_mocks=self.allow_mocks)
+        self.litellm_collector = LiteLLMCollector(ollama_url, allow_mocks=self.allow_mocks)
         
         self._previous_state: Optional[OracleMonitorState] = None
+    
+    def _merge_agents(
+        self,
+        telemetry_agents: List[AgentState],
+        discovered_agents: List[AgentState]
+    ) -> List[AgentState]:
+        """Merge telemetry-derived agent activity with k8s-discovered agents."""
+        telemetry_by_name = {a.name.lower(): a for a in telemetry_agents if a.name}
+        telemetry_by_deploy = {
+            a.deployment_name.lower(): a
+            for a in telemetry_agents
+            if a.deployment_name
+        }
+        merged: List[AgentState] = []
+        matched_names: set[str] = set()
+        matched_deploys: set[str] = set()
+        
+        for k8s_agent in discovered_agents:
+            name_key = (k8s_agent.name or "").lower()
+            deploy_key = (k8s_agent.deployment_name or "").lower()
+            match = telemetry_by_deploy.get(deploy_key) or telemetry_by_name.get(name_key)
+            if match:
+                merged.append(AgentState(
+                    name=k8s_agent.name or match.name,
+                    description=k8s_agent.description or match.description,
+                    deployment_name=k8s_agent.deployment_name or match.deployment_name,
+                    models=k8s_agent.models or match.models,
+                    activity=match.activity or k8s_agent.activity,
+                    max_parallel_invocations=k8s_agent.max_parallel_invocations
+                ))
+                if name_key:
+                    matched_names.add(name_key)
+                if deploy_key:
+                    matched_deploys.add(deploy_key)
+            else:
+                merged.append(k8s_agent)
+        
+        for agent in telemetry_agents:
+            name_key = (agent.name or "").lower()
+            deploy_key = (agent.deployment_name or "").lower()
+            if name_key in matched_names or deploy_key in matched_deploys:
+                continue
+            merged.append(agent)
+        
+        return merged
     
     async def get_state(self) -> OracleMonitorState:
         """
@@ -438,6 +524,7 @@ class OracleMonitorAggregator:
             self.litellm_collector.get_models(),
             return_exceptions=True
         )
+        discovered_agents = self.k8s_collector.get_discovered_agents()
         
         # Handle any exceptions
         if isinstance(agents, Exception):
@@ -452,6 +539,11 @@ class OracleMonitorAggregator:
         if isinstance(models, Exception):
             logger.error(f"Error collecting models: {models}")
             models = []
+        if isinstance(discovered_agents, Exception):
+            logger.error(f"Error collecting discovered agents: {discovered_agents}")
+            discovered_agents = []
+        
+        agents = self._merge_agents(agents, discovered_agents)
         
         state = OracleMonitorState(
             agents=agents,

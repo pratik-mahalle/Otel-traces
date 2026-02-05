@@ -18,6 +18,7 @@ from pydantic import BaseModel
 import uvicorn
 
 from aiokafka import AIOKafkaConsumer
+from jsonschema import Draft7Validator
 
 # Import new telemetry modules
 from ..telemetry.sampling import (
@@ -32,8 +33,28 @@ from ..telemetry.claude_integration import (
     ClaudeDiagnosticAnalyzer, DiagnosticBundle,
     get_diagnostic_bundle
 )
+from ..oracle.state_schema import ORACLE_MONITOR_SCHEMA
 
 logger = logging.getLogger(__name__)
+
+def _env_bool(name: str, default: bool) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def _oracle_strict_schema_default() -> bool:
+    return _env_bool("ORACLE_STRICT_SCHEMA", True)
+
+def _format_schema_error(err: Exception) -> Dict[str, Any]:
+    path = "/".join(str(p) for p in getattr(err, "path", []))
+    return {
+        "path": path,
+        "message": getattr(err, "message", str(err)),
+        "validator": getattr(err, "validator", None),
+        "validator_value": getattr(err, "validator_value", None)
+    }
 
 # Global instances for new features
 sampler: Optional[TelemetrySampler] = None
@@ -657,7 +678,10 @@ async def simulate_trace():
 # These endpoints are designed for Claude Code integration
 
 @app.get("/api/v1/oracle/state")
-async def get_oracle_state(format: str = Query(default="json", enum=["json", "log", "summary"])):
+async def get_oracle_state(
+    format: str = Query(default="json", enum=["json", "log", "summary"]),
+    strict: Optional[bool] = Query(default=None)
+):
     """
     Get unified Oracle Monitor system state.
     This endpoint provides a comprehensive view of:
@@ -682,12 +706,13 @@ async def get_oracle_state(format: str = Query(default="json", enum=["json", "lo
         
         state = await aggregator.get_state()
         
+        strict_output = _oracle_strict_schema_default() if strict is None else strict
         if format == "log":
             return {"log": state.to_diff_log()}
         elif format == "summary":
             return state.get_summary()
         else:
-            return state.to_dict()
+            return state.to_dict(strict=strict_output)
             
     except Exception as e:
         logger.error(f"Error getting Oracle state: {e}")
@@ -697,6 +722,42 @@ async def get_oracle_state(format: str = Query(default="json", enum=["json", "lo
             "message": "Failed to aggregate system state"
         }
 
+@app.get("/api/v1/oracle/schema")
+async def get_oracle_schema():
+    """Return the Oracle Monitor JSON schema."""
+    return ORACLE_MONITOR_SCHEMA
+
+@app.get("/api/v1/oracle/validate")
+async def validate_oracle_state():
+    """Validate current Oracle state against the JSON schema."""
+    try:
+        from ..oracle.state_aggregator import OracleMonitorAggregator
+
+        api_url = "http://localhost:8080"
+        ollama_url = os.environ.get("OLLAMA_BASE_URL", "http://ollama:11434")
+
+        aggregator = OracleMonitorAggregator(
+            namespace="telemetry",
+            api_url=api_url,
+            ollama_url=ollama_url
+        )
+
+        state = await aggregator.get_state()
+        state_dict = state.to_dict(strict=True)
+
+        validator = Draft7Validator(ORACLE_MONITOR_SCHEMA)
+        errors = sorted(validator.iter_errors(state_dict), key=lambda e: list(e.path))
+        if errors:
+            return {
+                "valid": False,
+                "error_count": len(errors),
+                "errors": [_format_schema_error(e) for e in errors]
+            }
+
+        return {"valid": True, "error_count": 0, "errors": []}
+    except Exception as e:
+        logger.error(f"Error validating Oracle state: {e}")
+        return {"valid": False, "error": str(e), "error_count": None, "errors": []}
 
 @app.get("/api/v1/oracle/agents")
 async def get_oracle_agents():
@@ -967,7 +1028,7 @@ async def claude_diagnose(
             ollama_url=ollama_url
         )
         state = await aggregator.get_state()
-        oracle_state = state.to_dict()
+        oracle_state = state.to_dict(strict=_oracle_strict_schema_default())
     except Exception as e:
         logger.warning(f"Could not get Oracle state: {e}")
 
@@ -1095,7 +1156,7 @@ async def claude_get_rate_limits():
             ollama_url=os.environ.get("OLLAMA_BASE_URL", "http://ollama:11434")
         )
         state = await aggregator.get_state()
-        oracle_state = state.to_dict()
+        oracle_state = state.to_dict(strict=_oracle_strict_schema_default())
     except Exception as e:
         return {"error": f"Could not get Oracle state: {e}"}
 
