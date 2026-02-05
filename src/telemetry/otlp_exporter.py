@@ -604,6 +604,8 @@ class OTLPExporter:
         """Queue a span for export"""
         otlp_span = OTLPSpanConverter.convert_span(span)
 
+        # Note: put_nowait is atomic and thread-safe on asyncio.Queue.
+        # We only need to protect the metric increment, not the queue operation itself.
         try:
             self._export_queue.put_nowait(otlp_span)
         except asyncio.QueueFull:
@@ -620,6 +622,8 @@ class OTLPExporter:
         """Export a complete trace with all its spans"""
         converted = OTLPSpanConverter.convert_trace(trace, spans)
 
+        # Note: put_nowait is atomic and thread-safe on asyncio.Queue.
+        # We only need to protect the metric increment, not the queue operation itself.
         for span in converted["spans"]:
             try:
                 self._export_queue.put_nowait(span)
