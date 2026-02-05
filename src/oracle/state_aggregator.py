@@ -8,8 +8,17 @@ import json
 import logging
 import os
 from datetime import datetime, timedelta
-from typing import Any, Dict, List, Optional
+from enum import Enum
+from typing import Any, Dict, List, Optional, Set
 import subprocess
+
+
+class DiscoveryMode(str, Enum):
+    """Agent discovery modes"""
+    LABELED = "labeled"      # Only agents with oracle-monitor/agent=true label
+    ALL = "all"              # All deployments in namespace
+    TELEMETRY = "telemetry"  # Auto-discover from telemetry data (spans/traces)
+    AUTO = "auto"            # Combine: labeled K8s + telemetry-derived
 
 try:
     from kubernetes import client, config
@@ -38,12 +47,18 @@ def _env_bool(name: str, default: bool) -> bool:
 
 class KubernetesCollector:
     """Collects workload state from Kubernetes"""
-    
-    def __init__(self, namespace: str = "telemetry", allow_mocks: bool = True):
+
+    def __init__(
+        self,
+        namespace: str = "telemetry",
+        allow_mocks: bool = True,
+        discovery_mode: DiscoveryMode = DiscoveryMode.AUTO
+    ):
         self.namespace = namespace
         self.allow_mocks = allow_mocks
+        self.discovery_mode = discovery_mode
         self._initialized = False
-        
+
         if HAS_K8S:
             try:
                 # Try in-cluster config first
@@ -139,54 +154,139 @@ class KubernetesCollector:
         return None
     
     def get_discovered_agents(self) -> List[AgentState]:
-        """Discover agents from Kubernetes deployments based on labels"""
+        """
+        Discover agents from Kubernetes deployments.
+
+        Discovery modes:
+        - LABELED: Only deployments with oracle-monitor/agent=true label
+        - ALL: All deployments in the namespace
+        - TELEMETRY: Skip K8s discovery (rely on telemetry data only)
+        - AUTO: Same as LABELED (telemetry agents merged separately)
+        """
         if not self._initialized:
             return []
-            
+
+        # TELEMETRY mode skips K8s discovery entirely
+        if self.discovery_mode == DiscoveryMode.TELEMETRY:
+            return []
+
         try:
             apps_v1 = client.AppsV1Api()
-            # Find deployments with the label 'oracle-monitor/agent=true'
-            deployments = apps_v1.list_namespaced_deployment(
-                self.namespace,
-                label_selector="oracle-monitor/agent=true"
-            )
-            
+
+            # Determine which deployments to fetch
+            if self.discovery_mode == DiscoveryMode.ALL:
+                # Get ALL deployments in namespace
+                deployments = apps_v1.list_namespaced_deployment(self.namespace)
+                logger.info(f"Discovery mode ALL: found {len(deployments.items)} deployments")
+            else:
+                # LABELED or AUTO: only labeled deployments
+                deployments = apps_v1.list_namespaced_deployment(
+                    self.namespace,
+                    label_selector="oracle-monitor/agent=true"
+                )
+                logger.info(f"Discovery mode {self.discovery_mode.value}: found {len(deployments.items)} labeled agents")
+
             discovered_agents = []
             for d in deployments.items:
+                labels = d.metadata.labels or {}
+                annotations = d.metadata.annotations or {}
+
+                # Check if this deployment is explicitly excluded
+                if annotations.get("oracle-monitor/exclude") == "true":
+                    continue
+
+                # Get agent metadata from labels/annotations (if present)
                 name = (
-                    d.metadata.labels.get("oracle-monitor/name")
-                    or d.metadata.annotations.get("oracle-monitor/name")
+                    labels.get("oracle-monitor/name")
+                    or annotations.get("oracle-monitor/name")
                     or d.metadata.name
                 )
                 desc = (
-                    d.metadata.annotations.get("oracle-monitor/description")
-                    or d.metadata.labels.get("oracle-monitor/description")
-                    or "Discovered k8s agent"
+                    annotations.get("oracle-monitor/description")
+                    or labels.get("oracle-monitor/description")
+                    or self._infer_description(d.metadata.name, labels)
                 )
                 model_list = (
-                    d.metadata.annotations.get("oracle-monitor/models")
-                    or d.metadata.labels.get("oracle-monitor/models")
+                    annotations.get("oracle-monitor/models")
+                    or labels.get("oracle-monitor/models")
                 )
                 if model_list:
                     models = [m.strip() for m in model_list.split(",") if m.strip()]
                 else:
-                    # Default to unknown to satisfy schema requirements
-                    models = ["unknown"]
-                
-                discovered_agents.append(AgentState(
-                    name=name,
-                    description=desc,
-                    deployment_name=d.metadata.name,
-                    models=models,
-                    activity=AgentActivity(active_task_ids=[], updated_at=datetime.utcnow()),
-                    max_parallel_invocations=int(d.spec.replicas or 1)
-                ))
-            
+                    # Try to infer model from image or default to unknown
+                    models = self._infer_models(d) or ["unknown"]
+
+                # Determine if this is an agent (for ALL mode)
+                is_agent = (
+                    labels.get("oracle-monitor/agent") == "true"
+                    or self.discovery_mode == DiscoveryMode.ALL
+                )
+
+                if is_agent:
+                    discovered_agents.append(AgentState(
+                        name=name,
+                        description=desc,
+                        deployment_name=d.metadata.name,
+                        models=models,
+                        activity=AgentActivity(active_task_ids=[], updated_at=datetime.utcnow()),
+                        max_parallel_invocations=int(d.spec.replicas or 1)
+                    ))
+
             return discovered_agents
-            
+
         except Exception as e:
             logger.warning(f"Error discovering agents from K8s: {e}")
-            return []    
+            return []
+
+    def _infer_description(self, name: str, labels: Dict[str, str]) -> str:
+        """Infer agent description from deployment name or labels"""
+        # Check common labels
+        if labels.get("app.kubernetes.io/component"):
+            return f"{labels['app.kubernetes.io/component']} service"
+        if labels.get("app"):
+            return f"{labels['app']} agent"
+
+        # Infer from name
+        name_lower = name.lower()
+        if "research" in name_lower:
+            return "Research and information gathering agent"
+        elif "write" in name_lower:
+            return "Content writing and editing agent"
+        elif "code" in name_lower or "dev" in name_lower:
+            return "Code analysis and development agent"
+        elif "orchestrat" in name_lower:
+            return "Multi-agent orchestration coordinator"
+        elif "api" in name_lower:
+            return "API service"
+        elif "kafka" in name_lower:
+            return "Message broker service"
+        elif "ollama" in name_lower:
+            return "Local LLM inference service"
+
+        return f"Discovered deployment: {name}"
+
+    def _infer_models(self, deployment) -> List[str]:
+        """Try to infer LLM models from deployment configuration"""
+        models = []
+        try:
+            containers = deployment.spec.template.spec.containers or []
+            for container in containers:
+                # Check environment variables for model hints
+                if container.env:
+                    for env_var in container.env:
+                        if env_var.name and "MODEL" in env_var.name.upper() and env_var.value:
+                            models.append(env_var.value)
+
+                # Check image name for common LLM services
+                image = container.image or ""
+                if "ollama" in image.lower():
+                    models.append("ollama/llama2")
+                elif "litellm" in image.lower():
+                    models.append("litellm/proxy")
+        except Exception:
+            pass
+
+        return models    
     def _get_mock_workloads(self) -> List[WorkloadState]:
         """Return mock workload data for testing"""
         return [
@@ -441,18 +541,35 @@ class LiteLLMCollector:
         return models
 
 
+def _get_discovery_mode() -> DiscoveryMode:
+    """Get discovery mode from environment variable"""
+    mode_str = os.getenv("ORACLE_DISCOVERY_MODE", "auto").lower().strip()
+    try:
+        return DiscoveryMode(mode_str)
+    except ValueError:
+        logger.warning(f"Invalid ORACLE_DISCOVERY_MODE '{mode_str}', defaulting to 'auto'")
+        return DiscoveryMode.AUTO
+
+
 class OracleMonitorAggregator:
     """
     Main aggregator that collects state from all sources
     and produces the unified Oracle Monitor state.
+
+    Discovery Modes (set via ORACLE_DISCOVERY_MODE env var):
+    - labeled: Only K8s deployments with oracle-monitor/agent=true label
+    - all: ALL deployments in the namespace (useful for debugging)
+    - telemetry: Auto-discover from telemetry data only (no K8s labels needed)
+    - auto: Combine labeled K8s agents + telemetry-derived agents (default)
     """
-    
+
     def __init__(
         self,
         namespace: str = "telemetry",
         api_url: str = "http://localhost:8080",
         ollama_url: str = "http://localhost:11434",
-        allow_mocks: Optional[bool] = None
+        allow_mocks: Optional[bool] = None,
+        discovery_mode: Optional[DiscoveryMode] = None
     ):
         self.namespace = namespace
         if allow_mocks is None:
@@ -460,7 +577,18 @@ class OracleMonitorAggregator:
             default_allow_mocks = env not in {"production", "prod"}
             allow_mocks = _env_bool("ORACLE_ALLOW_MOCKS", default_allow_mocks)
         self.allow_mocks = allow_mocks
-        self.k8s_collector = KubernetesCollector(namespace, allow_mocks=self.allow_mocks)
+
+        # Set discovery mode from param or environment
+        if discovery_mode is None:
+            discovery_mode = _get_discovery_mode()
+        self.discovery_mode = discovery_mode
+        logger.info(f"Oracle Monitor using discovery mode: {self.discovery_mode.value}")
+
+        self.k8s_collector = KubernetesCollector(
+            namespace,
+            allow_mocks=self.allow_mocks,
+            discovery_mode=self.discovery_mode
+        )
         self.telemetry_collector = TelemetryStoreCollector(api_url, allow_mocks=self.allow_mocks)
         self.litellm_collector = LiteLLMCollector(ollama_url, allow_mocks=self.allow_mocks)
         
