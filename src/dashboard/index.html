@@ -871,56 +871,65 @@
             if (!trace) return null;
 
             return (
-                <div className="glass-card animate-slide-up" style={{
+                <div style={{
                     position: 'fixed',
-                    top: '50%',
-                    left: '50%',
-                    transform: 'translate(-50%, -50%)',
-                    width: '80%',
-                    maxWidth: '900px',
-                    maxHeight: '85vh',
-                    overflow: 'hidden',
+                    top: 0,
+                    left: 0,
+                    right: 0,
+                    bottom: 0,
                     zIndex: 1000,
-                    boxShadow: '0 25px 50px rgba(0, 0, 0, 0.5)'
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    padding: '24px',
+                    pointerEvents: 'none'
                 }}>
-                    {/* Header */}
-                    <div style={{
-                        padding: '20px 24px',
-                        borderBottom: '1px solid var(--border-glass)',
-                        display: 'flex',
-                        justifyContent: 'space-between',
-                        alignItems: 'center'
+                    <div className="glass-card animate-slide-up" style={{
+                        width: '100%',
+                        maxWidth: '900px',
+                        maxHeight: '85vh',
+                        overflow: 'hidden',
+                        boxShadow: '0 25px 50px rgba(0, 0, 0, 0.5)',
+                        pointerEvents: 'auto'
                     }}>
-                        <div>
-                            <h2 style={{ fontSize: '18px', fontWeight: '600', marginBottom: '4px' }}>
-                                Trace Details
-                            </h2>
-                            <p style={{ fontFamily: 'monospace', color: 'var(--accent-cyan)', fontSize: '13px' }}>
-                                {trace.trace_id}
-                            </p>
+                        {/* Header */}
+                        <div style={{
+                            padding: '20px 24px',
+                            borderBottom: '1px solid var(--border-glass)',
+                            display: 'flex',
+                            justifyContent: 'space-between',
+                            alignItems: 'center'
+                        }}>
+                            <div>
+                                <h2 style={{ fontSize: '18px', fontWeight: '600', marginBottom: '4px' }}>
+                                    Trace Details
+                                </h2>
+                                <p style={{ fontFamily: 'monospace', color: 'var(--accent-cyan)', fontSize: '13px' }}>
+                                    {trace.trace_id}
+                                </p>
+                            </div>
+                            <button
+                                onClick={onClose}
+                                style={{
+                                    width: '36px',
+                                    height: '36px',
+                                    borderRadius: '10px',
+                                    border: 'none',
+                                    background: 'rgba(255,255,255,0.1)',
+                                    color: 'white',
+                                    cursor: 'pointer',
+                                    fontSize: '18px',
+                                    transition: 'all 0.2s ease'
+                                }}
+                                onMouseOver={e => e.target.style.background = 'rgba(239, 68, 68, 0.3)'}
+                                onMouseOut={e => e.target.style.background = 'rgba(255,255,255,0.1)'}
+                            >
+                                ✕
+                            </button>
                         </div>
-                        <button
-                            onClick={onClose}
-                            style={{
-                                width: '36px',
-                                height: '36px',
-                                borderRadius: '10px',
-                                border: 'none',
-                                background: 'rgba(255,255,255,0.1)',
-                                color: 'white',
-                                cursor: 'pointer',
-                                fontSize: '18px',
-                                transition: 'all 0.2s ease'
-                            }}
-                            onMouseOver={e => e.target.style.background = 'rgba(239, 68, 68, 0.3)'}
-                            onMouseOut={e => e.target.style.background = 'rgba(255,255,255,0.1)'}
-                        >
-                            ✕
-                        </button>
-                    </div>
 
-                    {/* Content */}
-                    <div style={{ padding: '24px', overflowY: 'auto', maxHeight: 'calc(85vh - 100px)' }}>
+                        {/* Content */}
+                        <div style={{ padding: '24px', overflowY: 'auto', maxHeight: 'calc(85vh - 100px)' }}>
                         {loading ? (
                             <div style={{ textAlign: 'center', padding: '40px' }}>
                                 <div style={{
@@ -1083,6 +1092,7 @@
                         )}
                     </div>
                 </div>
+            </div>
             );
         }
 
