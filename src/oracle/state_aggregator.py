@@ -283,6 +283,8 @@ class KubernetesCollector:
         # Deduplicate while preserving insertion order
         return list(dict.fromkeys(models))
 
+        return models
+    
     def _get_mock_workloads(self) -> List[WorkloadState]:
         """Return mock workload data for testing"""
         return [
