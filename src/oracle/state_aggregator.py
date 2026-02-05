@@ -9,7 +9,7 @@ import logging
 import os
 from datetime import datetime, timedelta
 from enum import Enum
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional
 import subprocess
 
 
@@ -216,21 +216,14 @@ class KubernetesCollector:
                     # Try to infer model from image or default to unknown
                     models = self._infer_models(d) or ["unknown"]
 
-                # Determine if this is an agent (for ALL mode)
-                is_agent = (
-                    labels.get("oracle-monitor/agent") == "true"
-                    or self.discovery_mode == DiscoveryMode.ALL
-                )
-
-                if is_agent:
-                    discovered_agents.append(AgentState(
-                        name=name,
-                        description=desc,
-                        deployment_name=d.metadata.name,
-                        models=models,
-                        activity=AgentActivity(active_task_ids=[], updated_at=datetime.utcnow()),
-                        max_parallel_invocations=int(d.spec.replicas or 1)
-                    ))
+                discovered_agents.append(AgentState(
+                    name=name,
+                    description=desc,
+                    deployment_name=d.metadata.name,
+                    models=models,
+                    activity=AgentActivity(active_task_ids=[], updated_at=datetime.utcnow()),
+                    max_parallel_invocations=int(d.spec.replicas or 1)
+                ))
 
             return discovered_agents
 
@@ -283,10 +276,13 @@ class KubernetesCollector:
                     models.append("ollama/llama2")
                 elif "litellm" in image.lower():
                     models.append("litellm/proxy")
-        except Exception:
-            pass
+        except Exception as exc:
+            # Best-effort inference: log and return any models collected so far
+            logger.warning("Failed to infer models from deployment %r: %s", getattr(deployment, "metadata", None), exc)
 
-        return models    
+        # Deduplicate while preserving insertion order
+        return list(dict.fromkeys(models))
+
     def _get_mock_workloads(self) -> List[WorkloadState]:
         """Return mock workload data for testing"""
         return [

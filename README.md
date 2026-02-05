@@ -63,8 +63,9 @@ Oracle Monitor supports **multiple discovery modes** to find agents:
 
 Set the mode via environment variable:
 ```bash
-export ORACLE_DISCOVERY_MODE=auto  # default
-export ORACLE_DISCOVERY_MODE=all   # discover all deployments
+export ORACLE_DISCOVERY_MODE=auto     # default
+export ORACLE_DISCOVERY_MODE=labeled  # only labeled agents
+export ORACLE_DISCOVERY_MODE=all      # discover all deployments
 export ORACLE_DISCOVERY_MODE=telemetry  # from traces only
 ```
 
