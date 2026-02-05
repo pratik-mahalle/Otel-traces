@@ -418,6 +418,7 @@ class OTLPExporter:
             "queue_drops": 0,
             "retries": 0
         }
+        self._metrics_lock = asyncio.Lock()
 
     @property
     def traces_endpoint(self) -> str:
@@ -526,12 +527,13 @@ class OTLPExporter:
         # Try to export with retries
         success = await self._send_with_retry(request_body)
 
-        if success:
-            self._metrics["spans_exported"] += len(batch)
-            self._metrics["batches_exported"] += 1
-        else:
-            self._metrics["spans_failed"] += len(batch)
-            self._metrics["batches_failed"] += 1
+        async with self._metrics_lock:
+            if success:
+                self._metrics["spans_exported"] += len(batch)
+                self._metrics["batches_exported"] += 1
+            else:
+                self._metrics["spans_failed"] += len(batch)
+                self._metrics["batches_failed"] += 1
 
     def _build_export_request(self, spans: List[Dict[str, Any]]) -> Dict[str, Any]:
         """Build OTLP export request body"""
@@ -575,10 +577,12 @@ class OTLPExporter:
                         # Rate limited - wait longer
                         retry_after = int(response.headers.get("Retry-After", delay * 2))
                         await asyncio.sleep(retry_after)
-                        self._metrics["retries"] += 1
+                        async with self._metrics_lock:
+                            self._metrics["retries"] += 1
                     elif response.status >= 500:
                         # Server error - retry
-                        self._metrics["retries"] += 1
+                        async with self._metrics_lock:
+                            self._metrics["retries"] += 1
                         await asyncio.sleep(delay)
                         delay *= self.config.retry_backoff_multiplier
                     else:
@@ -589,7 +593,8 @@ class OTLPExporter:
             except Exception as e:
                 logger.error(f"OTLP export error (attempt {attempt + 1}): {e}")
                 if attempt < self.config.max_retries:
-                    self._metrics["retries"] += 1
+                    async with self._metrics_lock:
+                        self._metrics["retries"] += 1
                     await asyncio.sleep(delay)
                     delay *= self.config.retry_backoff_multiplier
 
@@ -602,7 +607,8 @@ class OTLPExporter:
         try:
             self._export_queue.put_nowait(otlp_span)
         except asyncio.QueueFull:
-            self._metrics["queue_drops"] += 1
+            async with self._metrics_lock:
+                self._metrics["queue_drops"] += 1
             logger.warning("OTLP export queue full, dropping span")
 
     async def export_spans(self, spans: List[Dict[str, Any]]):
@@ -618,20 +624,22 @@ class OTLPExporter:
             try:
                 self._export_queue.put_nowait(span)
             except asyncio.QueueFull:
-                self._metrics["queue_drops"] += 1
+                async with self._metrics_lock:
+                    self._metrics["queue_drops"] += 1
 
     async def flush(self):
         """Force flush any buffered spans"""
         if self._batch:
             await self._export_batch()
 
-    def get_metrics(self) -> Dict[str, Any]:
+    async def get_metrics(self) -> Dict[str, Any]:
         """Get exporter metrics"""
-        return {
-            **self._metrics,
-            "queue_size": self._export_queue.qsize(),
-            "batch_size": len(self._batch)
-        }
+        async with self._metrics_lock:
+            return {
+                **self._metrics,
+                "queue_size": self._export_queue.qsize(),
+                "batch_size": len(self._batch)
+            }
 
 
 class TraceContextPropagator:
