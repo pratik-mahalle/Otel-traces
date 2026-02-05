@@ -9,6 +9,8 @@ kind: Service
 metadata:
   name: kafka
   namespace: telemetry
+  labels:
+    app: kafka
 spec:
   ports:
     - port: 9092
@@ -24,6 +26,8 @@ kind: StatefulSet
 metadata:
   name: kafka
   namespace: telemetry
+  labels:
+    app: kafka
 spec:
   serviceName: kafka
   replicas: 1
@@ -84,6 +88,8 @@ kind: Service
 metadata:
   name: ollama
   namespace: telemetry
+  labels:
+    app: ollama
 spec:
   ports:
     - port: 11434
@@ -96,6 +102,8 @@ kind: Deployment
 metadata:
   name: ollama
   namespace: telemetry
+  labels:
+    app: ollama
 spec:
   replicas: 1
   selector:
