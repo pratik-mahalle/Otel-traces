@@ -86,6 +86,114 @@ class DebugSubscription(BaseModel):
     event_types: List[str] = []
 
 
+# Agent registration models
+class AgentRegistration(BaseModel):
+    """Model for agent self-registration"""
+    name: str                              # Agent name (required)
+    agent_id: Optional[str] = None         # Unique ID (auto-generated if not provided)
+    description: Optional[str] = None      # Agent description
+    models: List[str] = ["unknown"]        # LLM models this agent uses
+    endpoint: Optional[str] = None         # Agent's API endpoint (if any)
+    capabilities: List[str] = []           # What the agent can do
+    metadata: Dict[str, Any] = {}          # Additional metadata
+    max_parallel_invocations: int = 1      # Max concurrent tasks
+
+
+class AgentHeartbeat(BaseModel):
+    """Model for agent heartbeat/status update"""
+    agent_id: str                          # Agent ID from registration
+    status: str = "healthy"                # healthy, busy, degraded, error
+    active_tasks: List[str] = []           # Currently running task IDs
+    metrics: Dict[str, Any] = {}           # Optional metrics (cpu, memory, etc.)
+
+
+class RegisteredAgent:
+    """Internal representation of a registered agent"""
+    def __init__(self, registration: AgentRegistration):
+        self.agent_id = registration.agent_id or f"agent-{registration.name.lower().replace(' ', '-')}-{datetime.utcnow().strftime('%Y%m%d%H%M%S')}"
+        self.name = registration.name
+        self.description = registration.description or f"Self-registered agent: {registration.name}"
+        self.models = registration.models
+        self.endpoint = registration.endpoint
+        self.capabilities = registration.capabilities
+        self.metadata = registration.metadata
+        self.max_parallel_invocations = registration.max_parallel_invocations
+        self.registered_at = datetime.utcnow()
+        self.last_heartbeat = datetime.utcnow()
+        self.status = "healthy"
+        self.active_tasks: List[str] = []
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "agent_id": self.agent_id,
+            "name": self.name,
+            "description": self.description,
+            "models": self.models,
+            "endpoint": self.endpoint,
+            "capabilities": self.capabilities,
+            "metadata": self.metadata,
+            "max_parallel_invocations": self.max_parallel_invocations,
+            "registered_at": self.registered_at.isoformat(),
+            "last_heartbeat": self.last_heartbeat.isoformat(),
+            "status": self.status,
+            "active_tasks": self.active_tasks,
+            "source": "self-registered"
+        }
+
+
+# Agent registry (in-memory, use Redis/DB in production)
+class AgentRegistry:
+    """Registry for self-registered agents"""
+    def __init__(self):
+        self.agents: Dict[str, RegisteredAgent] = {}
+        self.heartbeat_timeout_seconds = 60  # Mark unhealthy after 60s
+
+    def register(self, registration: AgentRegistration) -> RegisteredAgent:
+        agent = RegisteredAgent(registration)
+        self.agents[agent.agent_id] = agent
+        logger.info(f"Agent registered: {agent.name} (ID: {agent.agent_id})")
+        return agent
+
+    def heartbeat(self, heartbeat: AgentHeartbeat) -> Optional[RegisteredAgent]:
+        if heartbeat.agent_id not in self.agents:
+            return None
+        agent = self.agents[heartbeat.agent_id]
+        agent.last_heartbeat = datetime.utcnow()
+        agent.status = heartbeat.status
+        agent.active_tasks = heartbeat.active_tasks
+        if heartbeat.metrics:
+            agent.metadata["last_metrics"] = heartbeat.metrics
+        return agent
+
+    def unregister(self, agent_id: str) -> bool:
+        if agent_id in self.agents:
+            del self.agents[agent_id]
+            logger.info(f"Agent unregistered: {agent_id}")
+            return True
+        return False
+
+    def get_all(self) -> List[RegisteredAgent]:
+        self._check_heartbeats()
+        return list(self.agents.values())
+
+    def get(self, agent_id: str) -> Optional[RegisteredAgent]:
+        return self.agents.get(agent_id)
+
+    def _check_heartbeats(self):
+        """Mark agents as unhealthy if heartbeat timeout exceeded"""
+        now = datetime.utcnow()
+        for agent in self.agents.values():
+            seconds_since_heartbeat = (now - agent.last_heartbeat).total_seconds()
+            if seconds_since_heartbeat > self.heartbeat_timeout_seconds:
+                if agent.status != "unreachable":
+                    agent.status = "unreachable"
+                    logger.warning(f"Agent {agent.name} marked unreachable (no heartbeat for {seconds_since_heartbeat:.0f}s)")
+
+
+# Global registry instance
+agent_registry = AgentRegistry()
+
+
 # In-memory storage for demo (use proper DB in production)
 class TelemetryStore:
     def __init__(self):
@@ -841,6 +949,168 @@ async def get_oracle_issues():
     except Exception as e:
         logger.error(f"Error getting issues: {e}")
         return {"error": str(e), "status": "error", "issues": [str(e)]}
+
+
+# ============================================================================
+# AGENT REGISTRATION ENDPOINTS
+# ============================================================================
+# These endpoints allow agents running ANYWHERE (outside K8s, on VMs, locally,
+# as serverless functions, etc.) to self-register with the telemetry system.
+
+@app.post("/api/v1/agents/register")
+async def register_agent(registration: AgentRegistration):
+    """
+    Register an agent with the telemetry system.
+
+    Any agent can call this endpoint to make itself discoverable.
+    No K8s labels or telemetry emission required.
+
+    Example:
+    ```
+    curl -X POST http://localhost:8080/api/v1/agents/register \\
+      -H "Content-Type: application/json" \\
+      -d '{
+        "name": "MyExternalAgent",
+        "models": ["gpt-4", "claude-3"],
+        "description": "Agent running on external VM",
+        "endpoint": "http://my-agent.example.com:8000",
+        "capabilities": ["research", "analysis"]
+      }'
+    ```
+
+    Returns the assigned agent_id for use in heartbeats.
+    """
+    agent = agent_registry.register(registration)
+    return {
+        "status": "registered",
+        "agent_id": agent.agent_id,
+        "name": agent.name,
+        "message": f"Agent '{agent.name}' registered. Send heartbeats to /api/v1/agents/heartbeat"
+    }
+
+
+@app.post("/api/v1/agents/heartbeat")
+async def agent_heartbeat(heartbeat: AgentHeartbeat):
+    """
+    Send a heartbeat to indicate the agent is alive.
+
+    Agents should send heartbeats every 30-60 seconds.
+    If no heartbeat is received for 60 seconds, agent is marked 'unreachable'.
+
+    Example:
+    ```
+    curl -X POST http://localhost:8080/api/v1/agents/heartbeat \\
+      -H "Content-Type: application/json" \\
+      -d '{
+        "agent_id": "agent-myexternalagent-20240115120000",
+        "status": "healthy",
+        "active_tasks": ["task-123"],
+        "metrics": {"cpu": 45, "memory": 512}
+      }'
+    ```
+    """
+    agent = agent_registry.heartbeat(heartbeat)
+    if not agent:
+        raise HTTPException(status_code=404, detail=f"Agent '{heartbeat.agent_id}' not found. Register first.")
+
+    return {
+        "status": "ok",
+        "agent_id": agent.agent_id,
+        "agent_status": agent.status,
+        "last_heartbeat": agent.last_heartbeat.isoformat()
+    }
+
+
+@app.delete("/api/v1/agents/{agent_id}")
+async def unregister_agent(agent_id: str):
+    """
+    Unregister an agent from the system.
+
+    Call this when shutting down an agent gracefully.
+    """
+    if agent_registry.unregister(agent_id):
+        return {"status": "unregistered", "agent_id": agent_id}
+    raise HTTPException(status_code=404, detail=f"Agent '{agent_id}' not found")
+
+
+@app.get("/api/v1/agents/registered")
+async def list_registered_agents():
+    """
+    List all self-registered agents.
+
+    Returns agents that have registered via the /register endpoint.
+    Does NOT include K8s-discovered or telemetry-derived agents.
+    Use /api/v1/oracle/agents for the complete unified view.
+    """
+    agents = agent_registry.get_all()
+    return {
+        "count": len(agents),
+        "agents": [a.to_dict() for a in agents]
+    }
+
+
+@app.get("/api/v1/agents/registered/{agent_id}")
+async def get_registered_agent(agent_id: str):
+    """Get details of a specific registered agent"""
+    agent = agent_registry.get(agent_id)
+    if not agent:
+        raise HTTPException(status_code=404, detail=f"Agent '{agent_id}' not found")
+    return agent.to_dict()
+
+
+@app.get("/api/v1/agents/all")
+async def list_all_agents():
+    """
+    List ALL agents from all discovery sources:
+    - Self-registered agents (via /register)
+    - K8s-discovered agents (labels/all deployments)
+    - Telemetry-derived agents (from spans/traces)
+
+    This is the unified view of all known agents.
+    """
+    # Get self-registered agents
+    registered = agent_registry.get_all()
+    registered_agents = [a.to_dict() for a in registered]
+
+    # Get Oracle-discovered agents (K8s + telemetry)
+    oracle_agents = []
+    try:
+        from ..oracle.state_aggregator import OracleMonitorAggregator
+
+        aggregator = OracleMonitorAggregator(
+            api_url="http://localhost:8080",
+            ollama_url=os.environ.get("OLLAMA_BASE_URL", "http://ollama:11434")
+        )
+        state = await aggregator.get_state()
+        oracle_agents = [a.to_dict() for a in state.agents]
+    except Exception as e:
+        logger.warning(f"Could not get Oracle agents: {e}")
+
+    # Merge (avoid duplicates by name)
+    seen_names = set()
+    all_agents = []
+
+    # Registered agents take priority
+    for agent in registered_agents:
+        agent["source"] = "self-registered"
+        all_agents.append(agent)
+        seen_names.add(agent["name"].lower())
+
+    # Add Oracle agents that aren't duplicates
+    for agent in oracle_agents:
+        if agent["name"].lower() not in seen_names:
+            agent["source"] = "k8s/telemetry"
+            all_agents.append(agent)
+            seen_names.add(agent["name"].lower())
+
+    return {
+        "total": len(all_agents),
+        "by_source": {
+            "self_registered": len(registered_agents),
+            "k8s_telemetry": len([a for a in all_agents if a.get("source") == "k8s/telemetry"])
+        },
+        "agents": all_agents
+    }
 
 
 # ============================================================================

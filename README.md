@@ -119,6 +119,41 @@ Oracle Monitor sees the telemetry
 Agent appears in /api/v1/oracle/agents
 ```
 
+#### Option D: Self-Registration API (For External Agents)
+
+Agents running **anywhere** (VMs, serverless, other clusters) can self-register:
+
+```bash
+# Register an external agent
+curl -X POST http://localhost:8080/api/v1/agents/register \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "MyExternalAgent",
+    "models": ["gpt-4", "claude-3"],
+    "description": "Agent running on external VM",
+    "endpoint": "http://my-agent.example.com:8000",
+    "capabilities": ["research", "analysis"]
+  }'
+
+# Response:
+# {
+#   "status": "registered",
+#   "agent_id": "agent-myexternalagent-20240115120000",
+#   "message": "Agent 'MyExternalAgent' registered..."
+# }
+```
+
+Send heartbeats to stay alive (every 30-60 seconds):
+```bash
+curl -X POST http://localhost:8080/api/v1/agents/heartbeat \
+  -H "Content-Type: application/json" \
+  -d '{
+    "agent_id": "agent-myexternalagent-20240115120000",
+    "status": "healthy",
+    "active_tasks": ["task-123"]
+  }'
+```
+
 ### 2. Telemetry Collection
 
 Agents emit telemetry (spans, traces, events) to Kafka:
@@ -198,6 +233,16 @@ curl http://localhost:8080/health
 | `/api/v1/claude/rate-limits` | GET | LLM rate limit status |
 | `/api/v1/claude/actions` | GET | Prioritized suggested actions |
 | `/api/v1/claude/context/{trace_id}` | GET | Detailed trace context |
+
+### Agent Registration Endpoints (For External Agents)
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/v1/agents/register` | POST | Register an external agent |
+| `/api/v1/agents/heartbeat` | POST | Send agent heartbeat |
+| `/api/v1/agents/{agent_id}` | DELETE | Unregister an agent |
+| `/api/v1/agents/registered` | GET | List self-registered agents only |
+| `/api/v1/agents/all` | GET | List ALL agents (unified view) |
 
 ### Trace Endpoints
 
