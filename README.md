@@ -48,9 +48,29 @@ A production-ready telemetry system for multi-agent orchestration. Oracle Monito
 
 ## How It Works
 
-### 1. Agent Discovery (Kubernetes)
+### 1. Agent Discovery
 
-Oracle Monitor automatically discovers agents from K8s deployments:
+Oracle Monitor supports **multiple discovery modes** to find agents:
+
+#### Discovery Modes
+
+| Mode | Description | Use Case |
+|------|-------------|----------|
+| `auto` | Labeled K8s deployments + telemetry-derived agents | **Default** - Best of both worlds |
+| `labeled` | Only K8s deployments with `oracle-monitor/agent=true` | Explicit control over which deployments are agents |
+| `all` | ALL deployments in namespace | Quick setup - no labels needed |
+| `telemetry` | Auto-discover from telemetry data only | No K8s access required |
+
+Set the mode via environment variable:
+```bash
+export ORACLE_DISCOVERY_MODE=auto  # default
+export ORACLE_DISCOVERY_MODE=all   # discover all deployments
+export ORACLE_DISCOVERY_MODE=telemetry  # from traces only
+```
+
+#### Option A: Labeled Discovery (Recommended for Production)
+
+Add labels to your agent deployments:
 
 ```yaml
 metadata:
@@ -60,6 +80,43 @@ metadata:
   annotations:
     oracle-monitor/models: "gpt-4o,claude-3-5-sonnet"  # LLM models used
     oracle-monitor/description: "Research agent"       # Description
+```
+
+#### Option B: Discover All Deployments
+
+No labels needed - Oracle Monitor finds ALL deployments:
+
+```bash
+export ORACLE_DISCOVERY_MODE=all
+```
+
+Oracle will auto-infer agent details from:
+- Deployment name (e.g., `agent-researcher` → "Research agent")
+- Container environment variables (MODEL_NAME, etc.)
+- Container images (detects ollama, litellm, etc.)
+
+To **exclude** a deployment from discovery:
+```yaml
+metadata:
+  annotations:
+    oracle-monitor/exclude: "true"  # Skip this deployment
+```
+
+#### Option C: Telemetry-Based Discovery
+
+Agents are auto-discovered when they emit telemetry - no K8s labels needed:
+
+```bash
+export ORACLE_DISCOVERY_MODE=telemetry
+```
+
+When an agent emits spans/traces to Kafka, Oracle Monitor automatically registers it:
+```
+Agent emits span with agent_name="Researcher"
+        ↓
+Oracle Monitor sees the telemetry
+        ↓
+Agent appears in /api/v1/oracle/agents
 ```
 
 ### 2. Telemetry Collection
@@ -365,6 +422,7 @@ ws.onmessage = (event) => {
 
 | Variable | Default | Description |
 |----------|---------|-------------|
+| `ORACLE_DISCOVERY_MODE` | `auto` | Agent discovery mode: `auto`, `labeled`, `all`, `telemetry` |
 | `ORACLE_STRICT_SCHEMA` | `true` | Output strict JSON schema |
 | `ORACLE_ALLOW_MOCKS` | `false` (prod) | Allow mock data when K8s unavailable |
 | `KAFKA_BOOTSTRAP_SERVERS` | `kafka:9092` | Kafka connection |
