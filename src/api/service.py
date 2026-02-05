@@ -874,7 +874,7 @@ async def get_otlp_status():
     return {
         "status": "active",
         "endpoint": otlp_exporter.traces_endpoint,
-        "metrics": otlp_exporter.get_metrics(),
+        "metrics": await otlp_exporter.get_metrics(),
         "config": {
             "batch_size": otlp_exporter.config.batch_size,
             "batch_timeout_seconds": otlp_exporter.config.batch_timeout_seconds,
