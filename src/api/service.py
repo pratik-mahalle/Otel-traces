@@ -8,7 +8,7 @@ import json
 import logging
 import os
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Query
@@ -19,7 +19,26 @@ import uvicorn
 
 from aiokafka import AIOKafkaConsumer
 
+# Import new telemetry modules
+from ..telemetry.sampling import (
+    TelemetrySampler, SamplingConfig, RateLimitConfig,
+    SamplingDecision, get_default_sampler, configure_sampler
+)
+from ..telemetry.otlp_exporter import (
+    OTLPExporter, OTLPExporterConfig, create_otlp_exporter,
+    TraceContextPropagator, W3CTraceContext
+)
+from ..telemetry.claude_integration import (
+    ClaudeDiagnosticAnalyzer, DiagnosticBundle,
+    get_diagnostic_bundle
+)
+
 logger = logging.getLogger(__name__)
+
+# Global instances for new features
+sampler: Optional[TelemetrySampler] = None
+otlp_exporter: Optional[OTLPExporter] = None
+diagnostic_analyzer: Optional[ClaudeDiagnosticAnalyzer] = None
 
 
 # Pydantic models for API
@@ -152,17 +171,53 @@ manager = ConnectionManager()
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan manager"""
+    global sampler, otlp_exporter, diagnostic_analyzer
+
+    # Initialize sampler with default config
+    sampler = configure_sampler(
+        SamplingConfig(
+            head_sample_rate=1.0,  # Sample everything by default
+            tail_sample_enabled=True,
+            always_sample_errors=True,
+            always_sample_slow_traces=True,
+            slow_trace_threshold_ms=5000.0
+        ),
+        RateLimitConfig(
+            traces_per_second=100.0,
+            spans_per_second=1000.0,
+            events_per_second=500.0
+        )
+    )
+    logger.info("Telemetry sampler initialized")
+
+    # Initialize OTLP exporter (optional, based on env var)
+    otlp_endpoint = os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT")
+    if otlp_endpoint:
+        otlp_exporter = create_otlp_exporter(
+            endpoint=otlp_endpoint,
+            service_name=os.environ.get("OTEL_SERVICE_NAME", "multi-agent-telemetry")
+        )
+        await otlp_exporter.start()
+        logger.info(f"OTLP exporter started, endpoint: {otlp_endpoint}")
+
+    # Initialize diagnostic analyzer
+    diagnostic_analyzer = ClaudeDiagnosticAnalyzer(
+        slow_trace_threshold_ms=5000.0,
+        error_rate_threshold=0.1
+    )
+    logger.info("Claude diagnostic analyzer initialized")
+
     # Start Kafka consumer for receiving telemetry
-    kafka_servers = "kafka:9092"
+    kafka_servers = os.environ.get("KAFKA_BOOTSTRAP_SERVERS", "kafka:9092")
     topics = [
         "agent-telemetry-traces",
         "agent-telemetry-spans",
         "agent-telemetry-events",
         "agent-telemetry-handoffs"
     ]
-    
+
     consumer_task = None
-    
+
     try:
         consumer = AIOKafkaConsumer(
             *topics,
@@ -201,7 +256,7 @@ async def lifespan(app: FastAPI):
         logger.warning(f"Kafka not available: {e}. Running in standalone mode.")
     
     yield
-    
+
     # Cleanup
     if consumer_task:
         consumer_task.cancel()
@@ -209,6 +264,11 @@ async def lifespan(app: FastAPI):
             await consumer_task
         except asyncio.CancelledError:
             pass
+
+    # Cleanup OTLP exporter
+    if otlp_exporter:
+        await otlp_exporter.stop()
+        logger.info("OTLP exporter stopped")
 
 
 # Create FastAPI app
@@ -720,6 +780,493 @@ async def get_oracle_issues():
     except Exception as e:
         logger.error(f"Error getting issues: {e}")
         return {"error": str(e), "status": "error", "issues": [str(e)]}
+
+
+# ============================================================================
+# SAMPLING AND RATE LIMITING ENDPOINTS
+# ============================================================================
+
+@app.get("/api/v1/sampling/metrics")
+async def get_sampling_metrics():
+    """Get current sampling metrics and statistics"""
+    if not sampler:
+        return {"error": "Sampler not initialized", "metrics": {}}
+
+    return {
+        "status": "active",
+        "metrics": sampler.get_metrics(),
+        "config": {
+            "head_sample_rate": sampler.sampling_config.head_sample_rate,
+            "tail_sample_enabled": sampler.sampling_config.tail_sample_enabled,
+            "slow_trace_threshold_ms": sampler.sampling_config.slow_trace_threshold_ms,
+            "always_sample_errors": sampler.sampling_config.always_sample_errors
+        }
+    }
+
+
+@app.post("/api/v1/sampling/configure")
+async def configure_sampling(config: Dict[str, Any]):
+    """
+    Update sampling configuration dynamically.
+
+    Example:
+    {
+        "head_sample_rate": 0.5,
+        "slow_trace_threshold_ms": 3000,
+        "debug_trace_ids": ["trace-123", "trace-456"]
+    }
+    """
+    global sampler
+
+    if not sampler:
+        return {"error": "Sampler not initialized"}
+
+    # Update config
+    if "head_sample_rate" in config:
+        sampler.sampling_config.head_sample_rate = float(config["head_sample_rate"])
+
+    if "slow_trace_threshold_ms" in config:
+        sampler.sampling_config.slow_trace_threshold_ms = float(config["slow_trace_threshold_ms"])
+
+    if "debug_trace_ids" in config:
+        sampler.sampling_config.debug_trace_ids = set(config["debug_trace_ids"])
+
+    if "debug_session_ids" in config:
+        sampler.sampling_config.debug_session_ids = set(config["debug_session_ids"])
+
+    if "agent_sample_rates" in config:
+        sampler.sampling_config.agent_sample_rates = config["agent_sample_rates"]
+
+    return {
+        "status": "updated",
+        "new_config": {
+            "head_sample_rate": sampler.sampling_config.head_sample_rate,
+            "tail_sample_enabled": sampler.sampling_config.tail_sample_enabled,
+            "slow_trace_threshold_ms": sampler.sampling_config.slow_trace_threshold_ms,
+            "debug_trace_ids": list(sampler.sampling_config.debug_trace_ids),
+            "agent_sample_rates": sampler.sampling_config.agent_sample_rates
+        }
+    }
+
+
+@app.post("/api/v1/sampling/reset-metrics")
+async def reset_sampling_metrics():
+    """Reset sampling metrics counters"""
+    if sampler:
+        sampler.reset_metrics()
+        return {"status": "reset", "message": "Sampling metrics have been reset"}
+    return {"error": "Sampler not initialized"}
+
+
+# ============================================================================
+# OTLP EXPORT ENDPOINTS
+# ============================================================================
+
+@app.get("/api/v1/otlp/status")
+async def get_otlp_status():
+    """Get OTLP exporter status and metrics"""
+    if not otlp_exporter:
+        return {
+            "status": "disabled",
+            "message": "OTLP exporter not configured. Set OTEL_EXPORTER_OTLP_ENDPOINT to enable."
+        }
+
+    return {
+        "status": "active",
+        "endpoint": otlp_exporter.traces_endpoint,
+        "metrics": otlp_exporter.get_metrics(),
+        "config": {
+            "batch_size": otlp_exporter.config.batch_size,
+            "batch_timeout_seconds": otlp_exporter.config.batch_timeout_seconds,
+            "compression": otlp_exporter.config.compression,
+            "service_name": otlp_exporter.config.service_name
+        }
+    }
+
+
+@app.post("/api/v1/otlp/flush")
+async def flush_otlp():
+    """Force flush any buffered spans to OTLP endpoint"""
+    if not otlp_exporter:
+        return {"error": "OTLP exporter not configured"}
+
+    await otlp_exporter.flush()
+    return {"status": "flushed", "message": "Buffered spans have been exported"}
+
+
+@app.post("/api/v1/otlp/export-trace/{trace_id}")
+async def export_trace_to_otlp(trace_id: str):
+    """Export a specific trace to OTLP endpoint"""
+    if not otlp_exporter:
+        return {"error": "OTLP exporter not configured"}
+
+    trace = store.get_trace(trace_id)
+    if not trace:
+        raise HTTPException(status_code=404, detail="Trace not found")
+
+    spans = store.get_spans_for_trace(trace_id)
+
+    await otlp_exporter.export_trace(trace, spans)
+    await otlp_exporter.flush()
+
+    return {
+        "status": "exported",
+        "trace_id": trace_id,
+        "span_count": len(spans),
+        "endpoint": otlp_exporter.traces_endpoint
+    }
+
+
+# ============================================================================
+# CLAUDE CODE INTEGRATION ENDPOINTS
+# ============================================================================
+
+@app.get("/api/v1/claude/diagnose")
+async def claude_diagnose(
+    time_window_minutes: int = Query(default=15, le=60),
+    format: str = Query(default="json", enum=["json", "prompt", "summary"])
+):
+    """
+    Generate a diagnostic bundle for Claude Code.
+
+    This is the primary endpoint for Claude Code to query system state.
+
+    Parameters:
+    - time_window_minutes: Look back period (default 15, max 60)
+    - format: Response format
+        - json: Full structured data
+        - prompt: AI-optimized text format
+        - summary: Brief overview only
+
+    Response includes:
+    - System status (healthy/degraded/critical)
+    - Recent errors with analysis
+    - Performance metrics
+    - Rate limit status
+    - Slow traces
+    - Suggested actions
+    """
+    if not diagnostic_analyzer:
+        return {"error": "Diagnostic analyzer not initialized"}
+
+    # Gather data
+    traces = list(store.traces.values())
+    spans = list(store.spans.values())
+    events = store.events
+
+    # Get Oracle state if available
+    oracle_state = None
+    try:
+        from ..oracle.state_aggregator import OracleMonitorAggregator
+        api_url = "http://localhost:8080"
+        ollama_url = os.environ.get("OLLAMA_BASE_URL", "http://ollama:11434")
+
+        aggregator = OracleMonitorAggregator(
+            namespace="telemetry",
+            api_url=api_url,
+            ollama_url=ollama_url
+        )
+        state = await aggregator.get_state()
+        oracle_state = state.to_dict()
+    except Exception as e:
+        logger.warning(f"Could not get Oracle state: {e}")
+
+    # Generate diagnostic bundle
+    bundle = await diagnostic_analyzer.analyze(
+        traces=traces,
+        spans=spans,
+        events=events,
+        oracle_state=oracle_state,
+        time_window_minutes=time_window_minutes
+    )
+
+    if format == "prompt":
+        return {
+            "format": "prompt",
+            "content": bundle.to_claude_prompt()
+        }
+    elif format == "summary":
+        return {
+            "format": "summary",
+            "system_status": bundle.system_status,
+            "system_summary": bundle.system_summary,
+            "issue_counts": {
+                "critical": bundle.critical_count,
+                "high": bundle.high_count,
+                "medium": bundle.medium_count
+            },
+            "error_rate": bundle.error_rate,
+            "any_rate_limited": bundle.any_rate_limited,
+            "suggested_actions": bundle.suggested_actions[:3]
+        }
+    else:
+        return bundle.to_dict()
+
+
+@app.get("/api/v1/claude/errors")
+async def claude_get_errors(
+    limit: int = Query(default=10, le=50),
+    include_suggestions: bool = True
+):
+    """
+    Get recent errors with Claude-friendly analysis.
+
+    Returns errors grouped by type with:
+    - Error counts
+    - Affected agents
+    - Sample messages
+    - Contextual fix suggestions
+    """
+    if not diagnostic_analyzer:
+        return {"error": "Diagnostic analyzer not initialized"}
+
+    traces = list(store.traces.values())
+    spans = list(store.spans.values())
+    events = store.events
+
+    errors = diagnostic_analyzer._analyze_errors(traces, spans, events)
+
+    result = []
+    for error in errors[:limit]:
+        error_dict = error.to_dict()
+        if include_suggestions:
+            error_dict["suggestions"] = diagnostic_analyzer._get_error_suggestions(
+                error.error_category
+            )
+        result.append(error_dict)
+
+    return {
+        "total_error_types": len(errors),
+        "errors": result
+    }
+
+
+@app.get("/api/v1/claude/slow-traces")
+async def claude_get_slow_traces(
+    threshold_ms: float = Query(default=5000.0),
+    limit: int = Query(default=10, le=50)
+):
+    """
+    Get slow traces with bottleneck analysis.
+
+    Returns traces exceeding the threshold with:
+    - Duration breakdown
+    - Slowest span identification
+    - Bottleneck analysis
+    """
+    if not diagnostic_analyzer:
+        return {"error": "Diagnostic analyzer not initialized"}
+
+    # Temporarily override threshold
+    original_threshold = diagnostic_analyzer.slow_trace_threshold_ms
+    diagnostic_analyzer.slow_trace_threshold_ms = threshold_ms
+
+    traces = list(store.traces.values())
+    spans = list(store.spans.values())
+
+    slow_traces = diagnostic_analyzer._find_slow_traces(traces, spans)
+
+    # Restore threshold
+    diagnostic_analyzer.slow_trace_threshold_ms = original_threshold
+
+    return {
+        "threshold_ms": threshold_ms,
+        "count": len(slow_traces),
+        "traces": [s.to_dict() for s in slow_traces[:limit]]
+    }
+
+
+@app.get("/api/v1/claude/rate-limits")
+async def claude_get_rate_limits():
+    """
+    Get current rate limit status for all LLM models.
+
+    Returns:
+    - Per-model TPM/RPM usage
+    - Warning/limited status
+    - Estimated reset times
+    """
+    oracle_state = None
+    try:
+        from ..oracle.state_aggregator import OracleMonitorAggregator
+
+        aggregator = OracleMonitorAggregator(
+            api_url="http://localhost:8080",
+            ollama_url=os.environ.get("OLLAMA_BASE_URL", "http://ollama:11434")
+        )
+        state = await aggregator.get_state()
+        oracle_state = state.to_dict()
+    except Exception as e:
+        return {"error": f"Could not get Oracle state: {e}"}
+
+    if not oracle_state or not diagnostic_analyzer:
+        return {"error": "Required components not available"}
+
+    rate_limits = diagnostic_analyzer._analyze_rate_limits(oracle_state)
+
+    any_limited = any(r.is_limited for r in rate_limits)
+    any_warning = any(r.tpm_percentage > 80 or r.rpm_percentage > 80 for r in rate_limits)
+
+    return {
+        "status": "limited" if any_limited else "warning" if any_warning else "ok",
+        "any_limited": any_limited,
+        "models": [r.to_dict() for r in rate_limits]
+    }
+
+
+@app.get("/api/v1/claude/actions")
+async def claude_get_suggested_actions(
+    limit: int = Query(default=5, le=20)
+):
+    """
+    Get prioritized suggested actions for system improvement.
+
+    Returns actions sorted by priority with:
+    - Action description
+    - Rationale
+    - Related issue references
+    """
+    if not diagnostic_analyzer:
+        return {"error": "Diagnostic analyzer not initialized"}
+
+    # Generate full diagnostic to get actions
+    traces = list(store.traces.values())
+    spans = list(store.spans.values())
+    events = store.events
+
+    bundle = await diagnostic_analyzer.analyze(
+        traces=traces,
+        spans=spans,
+        events=events,
+        time_window_minutes=15
+    )
+
+    return {
+        "system_status": bundle.system_status,
+        "total_actions": len(bundle.suggested_actions),
+        "actions": bundle.suggested_actions[:limit]
+    }
+
+
+@app.get("/api/v1/claude/context/{trace_id}")
+async def claude_get_trace_context(trace_id: str):
+    """
+    Get detailed context for a specific trace for debugging.
+
+    Returns comprehensive trace information including:
+    - Full trace timeline
+    - All spans with details
+    - Error context if any
+    - Performance analysis
+    """
+    trace = store.get_trace(trace_id)
+    if not trace:
+        raise HTTPException(status_code=404, detail="Trace not found")
+
+    spans = store.get_spans_for_trace(trace_id)
+    events = store.get_events_for_trace(trace_id)
+    handoffs = store.get_handoffs_for_trace(trace_id)
+
+    # Analyze the trace
+    duration = trace.get("total_duration_ms", 0)
+    is_slow = duration > 5000
+    has_errors = any(s.get("status") == "failed" for s in spans)
+
+    # Find bottleneck if slow
+    bottleneck = None
+    if spans:
+        slowest = max(spans, key=lambda x: x.get("duration_ms", 0))
+        if slowest:
+            bottleneck = {
+                "span_id": slowest.get("span_id"),
+                "agent_name": slowest.get("agent_name"),
+                "duration_ms": slowest.get("duration_ms"),
+                "span_kind": slowest.get("span_kind")
+            }
+
+    # Build timeline
+    timeline = []
+    for span in sorted(spans, key=lambda x: x.get("start_time", "")):
+        timeline.append({
+            "type": "span",
+            "timestamp": span.get("start_time"),
+            "agent": span.get("agent_name"),
+            "kind": span.get("span_kind"),
+            "duration_ms": span.get("duration_ms"),
+            "status": span.get("status"),
+            "error": span.get("error_message")
+        })
+
+    for event in sorted(events, key=lambda x: x.get("timestamp", "")):
+        timeline.append({
+            "type": "event",
+            "timestamp": event.get("timestamp"),
+            "event_type": event.get("event_type"),
+            "message": event.get("message"),
+            "severity": event.get("severity")
+        })
+
+    timeline.sort(key=lambda x: x.get("timestamp", ""))
+
+    return {
+        "trace_id": trace_id,
+        "status": trace.get("status"),
+        "duration_ms": duration,
+        "is_slow": is_slow,
+        "has_errors": has_errors,
+        "summary": {
+            "agent_count": trace.get("agent_count", 0),
+            "llm_calls": trace.get("llm_call_count", 0),
+            "tool_calls": trace.get("tool_call_count", 0),
+            "total_tokens": trace.get("total_tokens", 0)
+        },
+        "bottleneck": bottleneck,
+        "timeline": timeline,
+        "handoffs": handoffs,
+        "user_input": trace.get("user_input"),
+        "final_output": trace.get("final_output")
+    }
+
+
+# ============================================================================
+# W3C TRACE CONTEXT PROPAGATION
+# ============================================================================
+
+@app.get("/api/v1/trace-context/create")
+async def create_trace_context(sampled: bool = True):
+    """
+    Create a new W3C trace context for distributed tracing.
+
+    Returns traceparent and tracestate headers to propagate.
+    """
+    context = TraceContextPropagator.create_context(sampled=sampled)
+
+    return {
+        "trace_id": context.trace_id,
+        "span_id": context.span_id,
+        "sampled": context.is_sampled,
+        "headers": context.to_headers()
+    }
+
+
+@app.post("/api/v1/trace-context/parse")
+async def parse_trace_context(headers: Dict[str, str]):
+    """
+    Parse W3C trace context from HTTP headers.
+
+    Input: {"traceparent": "00-...", "tracestate": "..."}
+    """
+    context = TraceContextPropagator.extract(headers)
+
+    if not context:
+        return {"error": "Invalid or missing traceparent header"}
+
+    return {
+        "trace_id": context.trace_id,
+        "span_id": context.span_id,
+        "sampled": context.is_sampled,
+        "trace_state": context.trace_state
+    }
 
 
 def main():
