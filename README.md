@@ -13,7 +13,7 @@ Orchestrator writes task  -->  agent-queue-researcher  -->  Researcher reads
 Researcher writes result  -->  agent-queue-orchestrator -->  Orchestrator reads
 ```
 
-The telemetry service observes all queue traffic (read-only) and stores errors, traces, and metrics separately for debugging.
+The telemetry service observes queue traffic (read-only) and captures **only errors** to a dedicated error store for Claude Code debugging.
 
 ```
                     ┌──────────────────────────────────────────────┐
@@ -33,15 +33,14 @@ The telemetry service observes all queue traffic (read-only) and stores errors, 
                     │   │  agent-queue-coder                      │  │
                     │   │  agent-queue-reviewer                   │  │
                     │   │                                        │  │
-                    │   │  + agent-telemetry-* (observability)   │  │
+                    │   │  + agent-telemetry-errors (error logs) │  │
                     │   └──────────────────┬────────────────────┘  │
                     │                      │                        │
                     │                      ▼                        │
                     │   ┌───────────────────────────────────────┐  │
                     │   │     Telemetry API (Observer)           │  │
                     │   │                                        │  │
-                    │   │  Queue Messages │ Error Store │ Traces │  │
-                    │   │  Metrics        │ Handoffs    │ Events │  │
+                    │   │  Queue Messages  │  Error Store        │  │
                     │   └──────────────────┬────────────────────┘  │
                     │                      │                        │
                     └──────────────────────┼────────────────────────┘
@@ -77,14 +76,11 @@ Each agent has its own Kafka topic. Agents talk to each other by writing to the 
 5. Orchestrator reads the result from its own queue
 ```
 
-### 2. Telemetry Observation
+### 2. Error Capture (Only Errors Sent to Kafka)
 
-The Telemetry API subscribes to all Kafka topics (read-only) and separates data into dedicated stores:
+Only **errors** are sent to Kafka as telemetry. When an agent fails (LLM error, tool error, timeout, etc.), a `DetailedError` is published to `agent-telemetry-errors`. The Telemetry API consumes this topic and stores errors in a dedicated Error Store.
 
-- **Agent Messages** -- observed queue traffic (who sent what to whom)
-- **Error Store** -- `DetailedError` objects with stack traces, severity, suggested fixes
-- **Traces / Spans** -- execution traces across agents
-- **Metrics** -- performance data (latency, tokens, etc.)
+The Telemetry API also observes agent queue traffic (read-only) to track which tasks are pending.
 
 ### 3. Claude Code Debugging
 
@@ -115,6 +111,8 @@ kubectl -n telemetry port-forward service/telemetry-api 8080:8080
 curl http://localhost:8080/health
 ```
 
+**If `ollama` or `telemetry-dashboard` stay in ContainerCreating:** they pull `ollama/ollama:latest` (~2–4GB) and `nginx:alpine` from the network. The first time can take 5–15+ minutes. Re-run `./scripts/setup.sh` to pre-pull and load these images into Kind so future runs start quickly.
+
 ---
 
 ## API Endpoints
@@ -144,14 +142,11 @@ curl http://localhost:8080/health
 | `GET /api/v1/oracle/state` | Full system state (strict JSON schema) |
 | `GET /api/v1/oracle/validate` | Validate state against schema |
 
-### Traces & Metrics
+### Real-Time
 
 | Endpoint | Description |
 |----------|-------------|
-| `GET /api/v1/traces` | List traces |
-| `GET /api/v1/traces/{trace_id}` | Trace with spans |
-| `GET /api/v1/metrics/spans` | Span-level performance metrics |
-| `WS /ws/debug/{client_id}` | Real-time debug events |
+| `WS /ws/debug/{client_id}` | Real-time error alerts + queue activity |
 
 ---
 

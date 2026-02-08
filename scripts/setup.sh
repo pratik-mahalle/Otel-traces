@@ -114,7 +114,7 @@ create_cluster() {
     log_success "Kind cluster created successfully!"
 }
 
-# Build Docker images
+# Build Docker images and pre-load external images into Kind
 build_images() {
     log_info "Building Docker images..."
     
@@ -124,8 +124,17 @@ build_images() {
     log_info "Building telemetry-api image..."
     docker build -f docker/Dockerfile.api -t telemetry-api:latest .
     
-    # Load images into Kind cluster
-    log_info "Loading images into Kind cluster..."
+    # Pre-pull and load images used by deployment (avoids long ContainerCreating)
+    # ollama/ollama:latest is large (~2–4GB); nginx:alpine is small
+    log_info "Pulling and loading ollama/ollama:latest into Kind (this may take several minutes)..."
+    docker pull ollama/ollama:latest 2>/dev/null || true
+    kind load docker-image ollama/ollama:latest --name telemetry-cluster 2>/dev/null || true
+    log_info "Pulling and loading nginx:alpine into Kind..."
+    docker pull nginx:alpine 2>/dev/null || true
+    kind load docker-image nginx:alpine --name telemetry-cluster 2>/dev/null || true
+    
+    # Load our API image
+    log_info "Loading telemetry-api into Kind cluster..."
     kind load docker-image telemetry-api:latest --name telemetry-cluster
     
     log_success "Docker images built and loaded!"
@@ -169,14 +178,14 @@ create_kafka_topics() {
     KAFKA_POD=$(kubectl -n telemetry get pods -l app=kafka -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo "")
     
     if [ -n "$KAFKA_POD" ]; then
-        # Telemetry topics (observability)
-        TELEMETRY_TOPICS=("agent-telemetry-spans" "agent-telemetry-traces" "agent-telemetry-events" "agent-telemetry-handoffs" "agent-telemetry-metrics" "agent-telemetry-errors")
-        
         # Inter-agent communication queues (one per agent)
         AGENT_QUEUE_TOPICS=("agent-queue-orchestrator" "agent-queue-researcher" "agent-queue-writer" "agent-queue-coder" "agent-queue-reviewer")
         
-        # Combine both sets
-        TOPICS=("${TELEMETRY_TOPICS[@]}" "${AGENT_QUEUE_TOPICS[@]}")
+        # Error logs topic (only telemetry data sent to Kafka)
+        ERROR_TOPIC=("agent-telemetry-errors")
+        
+        # Combine: agent queues + errors
+        TOPICS=("${AGENT_QUEUE_TOPICS[@]}" "${ERROR_TOPIC[@]}")
         
         for topic in "${TOPICS[@]}"; do
             kubectl -n telemetry exec "$KAFKA_POD" -- sh -c "\

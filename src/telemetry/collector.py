@@ -1,6 +1,6 @@
 """
 Telemetry Collector - Kafka Integration
-Collects and streams telemetry data for multi-agent debugging
+Only ERRORS are sent to Kafka for telemetry. Inter-agent messages go through agent queues.
 """
 
 import asyncio
@@ -27,7 +27,9 @@ logger = logging.getLogger(__name__)
 class TelemetryCollector:
     """
     Main telemetry collector for multi-agent systems.
-    Sends telemetry data to Kafka for real-time debugging.
+    Only errors are sent to Kafka (agent-telemetry-errors topic).
+    Inter-agent communication uses per-agent Kafka queues.
+    Spans, traces, handoffs are tracked internally but NOT sent to Kafka.
     """
     
     def __init__(
@@ -157,7 +159,7 @@ class TelemetryCollector:
         return trace
     
     async def complete_trace(self, trace_id: str, output: str = ""):
-        """Complete a trace and send it to Kafka"""
+        """Complete a trace (tracked internally, not sent to Kafka)"""
         if trace_id not in self._active_traces:
             logger.warning(f"Trace {trace_id} not found")
             return
@@ -165,23 +167,9 @@ class TelemetryCollector:
         trace = self._active_traces[trace_id]
         trace.complete(output)
         
-        await self._send(
-            KAFKA_TOPICS["traces"],
-            trace_id,
-            trace.to_dict(),
-            immediate=True
-        )
-        
-        # Emit debug event
-        await self.emit_event(
-            trace_id=trace_id,
-            event_type="trace_complete",
-            message=f"Trace completed with {trace.agent_count} agents",
-            data={
-                "duration_ms": trace.total_duration_ms,
-                "total_tokens": trace.total_tokens,
-                "agent_count": trace.agent_count
-            }
+        logger.info(
+            f"Trace {trace_id} completed: {trace.agent_count} agents, "
+            f"{trace.total_duration_ms:.0f}ms"
         )
         
         del self._active_traces[trace_id]
@@ -209,16 +197,6 @@ class TelemetryCollector:
         )
         self._active_spans[span.span_id] = span
         
-        # Emit start event
-        await self.emit_event(
-            trace_id=trace_id,
-            span_id=span.span_id,
-            event_type=f"{span_kind.value}_start",
-            agent_id=agent_id,
-            agent_name=agent_name,
-            message=f"Started {span_kind.value}: {agent_name}"
-        )
-        
         try:
             yield span
             span.complete()
@@ -236,57 +214,16 @@ class TelemetryCollector:
             )
             raise
         finally:
-            # Add span to trace
+            # Track span internally (not sent to Kafka)
             if trace_id in self._active_traces:
                 self._active_traces[trace_id].add_span(span)
-            
-            # Send span to Kafka
-            await self._send(
-                KAFKA_TOPICS["spans"],
-                span.span_id,
-                span.to_dict()
-            )
-            
-            # Send metrics for completed spans
-            if span.duration_ms is not None:
-                await self.record_metrics(
-                    trace_id=trace_id,
-                    agent_id=agent_id,
-                    agent_name=agent_name,
-                    metrics={
-                        "span_id": span.span_id,
-                        "span_kind": span_kind.value,
-                        "duration_ms": span.duration_ms,
-                        "status": span.status.value,
-                        "token_usage": span.token_usage.to_dict() if span.token_usage else None,
-                        "tool_count": len(span.tool_invocations),
-                        "event_count": len(span.events)
-                    }
-                )
-            
-            # Emit end event
-            await self.emit_event(
-                trace_id=trace_id,
-                span_id=span.span_id,
-                event_type=f"{span_kind.value}_end",
-                agent_id=agent_id,
-                agent_name=agent_name,
-                message=f"Completed {span_kind.value}: {agent_name}",
-                data={"duration_ms": span.duration_ms, "status": span.status.value}
-            )
             
             del self._active_spans[span.span_id]
     
     async def record_span(self, span: AgentSpan):
-        """Manually record a span"""
+        """Manually record a span (tracked internally, not sent to Kafka)"""
         if span.trace_id in self._active_traces:
             self._active_traces[span.trace_id].add_span(span)
-            
-        await self._send(
-            KAFKA_TOPICS["spans"],
-            span.span_id,
-            span.to_dict()
-        )
     
     # Error Recording
     
@@ -297,32 +234,13 @@ class TelemetryCollector:
     ):
         """
         Record a DetailedError to the dedicated Kafka errors topic.
-        This ensures errors are persisted independently of spans/events
-        and are queryable for Claude Code debugging.
+        This is the ONLY telemetry data sent to Kafka.
         """
         await self._send(
             KAFKA_TOPICS["errors"],
             error.error_id,
             error.to_dict(),
             immediate=immediate
-        )
-        
-        # Also emit a debug event so real-time subscribers see it
-        await self.emit_event(
-            trace_id=error.trace_id or "",
-            span_id=error.span_id,
-            event_type="error_recorded",
-            severity=error.severity.value,
-            agent_id=error.agent_id,
-            agent_name=error.agent_name,
-            message=f"[{error.category.value}] {error.error_type}: {error.error_message}",
-            data={
-                "error_id": error.error_id,
-                "category": error.category.value,
-                "severity": error.severity.value,
-                "is_retryable": error.is_retryable,
-                "suggested_fixes": error.suggested_fixes[:3]
-            }
         )
         
         logger.info(
@@ -360,35 +278,7 @@ class TelemetryCollector:
         await self.record_error(error)
         return error
     
-    # Metrics Recording
-    
-    async def record_metrics(
-        self,
-        trace_id: str,
-        agent_id: Optional[str] = None,
-        agent_name: Optional[str] = None,
-        metrics: Dict[str, Any] = None
-    ):
-        """
-        Record performance metrics to the dedicated Kafka metrics topic.
-        """
-        metrics_data = {
-            "trace_id": trace_id,
-            "agent_id": agent_id,
-            "agent_name": agent_name,
-            "metrics": metrics or {},
-            "timestamp": datetime.utcnow().isoformat(),
-            "service_name": self.service_name,
-            "environment": self.environment
-        }
-        
-        await self._send(
-            KAFKA_TOPICS["metrics"],
-            trace_id,
-            metrics_data
-        )
-    
-    # Handoff Recording
+    # Handoff Recording (internal tracking only, not sent to Kafka)
     
     async def record_handoff(
         self,
@@ -400,7 +290,7 @@ class TelemetryCollector:
         reason: str,
         context: Dict[str, Any] = None
     ):
-        """Record a handoff between agents"""
+        """Record a handoff between agents (tracked internally)"""
         handoff = AgentHandoff(
             trace_id=trace_id,
             source_agent_id=source_agent_id,
@@ -414,25 +304,9 @@ class TelemetryCollector:
         if trace_id in self._active_traces:
             self._active_traces[trace_id].add_handoff(handoff)
         
-        await self._send(
-            KAFKA_TOPICS["handoffs"],
-            handoff.handoff_id,
-            handoff.to_dict(),
-            immediate=True
-        )
-        
-        await self.emit_event(
-            trace_id=trace_id,
-            event_type="handoff",
-            message=f"Handoff: {source_agent_name} -> {target_agent_name}",
-            data={
-                "reason": reason,
-                "source_agent": source_agent_name,
-                "target_agent": target_agent_name
-            }
-        )
+        logger.info(f"Handoff: {source_agent_name} -> {target_agent_name} ({reason})")
     
-    # Debug Events
+    # Debug Events (local handlers only, not sent to Kafka)
     
     async def emit_event(
         self,
@@ -445,7 +319,7 @@ class TelemetryCollector:
         severity: str = "info",
         data: Dict[str, Any] = None
     ):
-        """Emit a debug event for real-time debugging"""
+        """Emit a debug event to local handlers (not sent to Kafka)"""
         event = DebugEvent(
             trace_id=trace_id,
             span_id=span_id,
@@ -457,14 +331,7 @@ class TelemetryCollector:
             data=data or {}
         )
         
-        await self._send(
-            KAFKA_TOPICS["events"],
-            event.event_id,
-            event.to_dict(),
-            immediate=True
-        )
-        
-        # Notify local handlers
+        # Notify local handlers only
         if event_type in self._event_handlers:
             for handler in self._event_handlers[event_type]:
                 try:
@@ -500,19 +367,6 @@ class TelemetryCollector:
         self._consumers[group_id] = consumer
         return consumer
     
-    async def consume_events(self, callback: Callable[[Dict[str, Any]], None]):
-        """Consume events for real-time debugging"""
-        consumer = await self.subscribe(
-            [KAFKA_TOPICS["events"]],
-            group_id="debug-event-consumer"
-        )
-        
-        async for message in consumer:
-            try:
-                await callback(message.value)
-            except Exception as e:
-                logger.error(f"Error processing event: {e}")
-    
     # ========================================================================
     # Inter-Agent Communication via Kafka Queues
     # ========================================================================
@@ -540,44 +394,6 @@ class TelemetryCollector:
             message.to_dict(),
             immediate=immediate
         )
-        
-        # Emit a telemetry event so the queue write is observable
-        await self.emit_event(
-            trace_id=message.trace_id or "",
-            span_id=message.span_id,
-            event_type="agent_queue_write",
-            agent_id=None,
-            agent_name=message.source_agent,
-            message=(
-                f"[{message.message_type.value}] "
-                f"{message.source_agent} -> {message.target_agent}: "
-                f"{message.reason}"
-            ),
-            data={
-                "message_id": message.message_id,
-                "source_agent": message.source_agent,
-                "target_agent": message.target_agent,
-                "message_type": message.message_type.value,
-                "priority": message.priority.value,
-                "queue_topic": topic
-            }
-        )
-        
-        # Record the handoff in telemetry so it appears in trace data
-        if message.message_type == MessageType.TASK and message.trace_id:
-            await self.record_handoff(
-                trace_id=message.trace_id,
-                source_agent_id="",
-                source_agent_name=message.source_agent,
-                target_agent_id="",
-                target_agent_name=message.target_agent,
-                reason=message.reason,
-                context={
-                    "message_id": message.message_id,
-                    "queue_topic": topic,
-                    "priority": message.priority.value
-                }
-            )
         
         logger.info(
             f"Sent {message.message_type.value} to {topic}: "
@@ -612,26 +428,6 @@ class TelemetryCollector:
         async for raw_message in consumer:
             try:
                 msg = AgentMessage.from_dict(raw_message.value)
-                
-                # Emit a telemetry event for the queue read
-                await self.emit_event(
-                    trace_id=msg.trace_id or "",
-                    span_id=msg.span_id,
-                    event_type="agent_queue_read",
-                    agent_name=agent_name,
-                    message=(
-                        f"[{msg.message_type.value}] "
-                        f"{agent_name} <- {msg.source_agent}: "
-                        f"{msg.reason}"
-                    ),
-                    data={
-                        "message_id": msg.message_id,
-                        "source_agent": msg.source_agent,
-                        "target_agent": msg.target_agent,
-                        "message_type": msg.message_type.value,
-                        "queue_topic": topic
-                    }
-                )
                 
                 # Invoke the agent's handler
                 if asyncio.iscoroutinefunction(callback):
@@ -710,16 +506,15 @@ class InMemoryTelemetryCollector(TelemetryCollector):
                 "timestamp": datetime.utcnow().isoformat()
             })
         
-        # Notify event handlers for telemetry events
-        if topic == KAFKA_TOPICS["events"]:
-            event_type = value.get("event_type")
-            if event_type in self._event_handlers:
-                for handler in self._event_handlers[event_type]:
+        # Notify local event handlers for error events
+        if topic == KAFKA_TOPICS["errors"]:
+            if "error_recorded" in self._event_handlers:
+                for handler in self._event_handlers["error_recorded"]:
                     try:
                         if asyncio.iscoroutinefunction(handler):
-                            await handler(DebugEvent(**value))
+                            await handler(value)
                         else:
-                            handler(DebugEvent(**value))
+                            handler(value)
                     except Exception as e:
                         logger.error(f"Event handler error: {e}")
     
@@ -746,21 +541,6 @@ class InMemoryTelemetryCollector(TelemetryCollector):
         """Get all inter-agent queue messages grouped by topic"""
         return dict(self._agent_queues)
     
-    def get_trace(self, trace_id: str) -> Optional[Dict[str, Any]]:
-        """Get a completed trace by ID"""
-        for msg in self._messages[KAFKA_TOPICS["traces"]]:
-            if msg["key"] == trace_id:
-                return msg["value"]
-        return None
-    
-    def get_spans(self, trace_id: str) -> List[Dict[str, Any]]:
-        """Get all spans for a trace"""
-        return [
-            msg["value"]
-            for msg in self._messages[KAFKA_TOPICS["spans"]]
-            if msg["value"].get("trace_id") == trace_id
-        ]
-    
     def get_errors(self, trace_id: Optional[str] = None) -> List[Dict[str, Any]]:
         """Get all errors, optionally filtered by trace_id"""
         errors = [msg["value"] for msg in self._messages[KAFKA_TOPICS["errors"]]]
@@ -783,13 +563,6 @@ class InMemoryTelemetryCollector(TelemetryCollector):
             for msg in self._messages[KAFKA_TOPICS["errors"]]
             if msg["value"].get("category") == category
         ]
-    
-    def get_metrics(self, trace_id: Optional[str] = None) -> List[Dict[str, Any]]:
-        """Get all metrics, optionally filtered by trace_id"""
-        metrics = [msg["value"] for msg in self._messages[KAFKA_TOPICS["metrics"]]]
-        if trace_id:
-            metrics = [m for m in metrics if m.get("trace_id") == trace_id]
-        return metrics
     
     def clear(self):
         """Clear all messages (telemetry + agent queues)"""

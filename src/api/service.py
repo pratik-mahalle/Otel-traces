@@ -347,24 +347,17 @@ async def lifespan(app: FastAPI):
     )
     logger.info("Claude diagnostic analyzer initialized")
 
-    # Start Kafka consumer for receiving telemetry AND observing agent queues
+    # Start Kafka consumer for errors + agent queue observation
     kafka_servers = os.environ.get("KAFKA_BOOTSTRAP_SERVERS", "kafka:9092")
     
-    # Telemetry topics (observability data)
-    telemetry_topics = [
-        "agent-telemetry-traces",
-        "agent-telemetry-spans",
-        "agent-telemetry-events",
-        "agent-telemetry-handoffs",
-        "agent-telemetry-errors",
-        "agent-telemetry-metrics"
-    ]
+    # Only errors topic for telemetry (spans/traces/events/metrics NOT sent to Kafka)
+    error_topic = ["agent-telemetry-errors"]
     
     # Agent queue topics (inter-agent communication — observed read-only)
     agent_queue_topics = [agent_queue_topic(name) for name in DEFAULT_AGENT_NAMES]
     
-    # Combined: telemetry + agent queues
-    topics = telemetry_topics + agent_queue_topics
+    # Combined: errors + agent queues
+    topics = error_topic + agent_queue_topics
 
     consumer_task = None
 
@@ -386,52 +379,25 @@ async def lifespan(app: FastAPI):
                 # ---- Inter-agent queue messages (observed for monitoring) ----
                 if topic.startswith(AGENT_QUEUE_PREFIX):
                     store.add_agent_message(value)
-                    # Broadcast to WebSocket clients
                     await manager.broadcast({
                         "type": "agent_queue_message",
                         "queue_topic": topic,
                         "message_type": value.get("message_type", "unknown"),
                         "source_agent": value.get("source_agent", ""),
                         "target_agent": value.get("target_agent", ""),
-                        "reason": value.get("reason", ""),
                         **value
                     })
-                    logger.debug(
-                        f"Observed queue message on {topic}: "
-                        f"{value.get('source_agent')} -> {value.get('target_agent')} "
-                        f"[{value.get('message_type')}]"
-                    )
-                # ---- Telemetry topics ----
-                elif "traces" in topic:
-                    store.add_trace(value)
+                
+                # ---- Error logs (only telemetry data sent to Kafka) ----
                 elif "errors" in topic:
                     store.add_error(value)
-                    # Broadcast errors to WebSocket clients for real-time debugging
                     await manager.broadcast({
                         "type": "error",
-                        "event_type": "error_recorded",
                         "severity": value.get("severity", "error"),
                         "category": value.get("category", "unknown"),
                         "message": f"[{value.get('severity', 'error').upper()}] "
                                    f"{value.get('error_type', 'Error')}: "
                                    f"{value.get('error_message', 'Unknown error')}",
-                        **value
-                    })
-                    logger.debug(
-                        f"Stored error: {value.get('error_id')} "
-                        f"[{value.get('severity')}] {value.get('category')}"
-                    )
-                elif "metrics" in topic:
-                    store.add_metric(value)
-                elif "spans" in topic:
-                    store.add_span(value)
-                elif "events" in topic:
-                    store.add_event(value)
-                    await manager.broadcast(value)
-                elif "handoffs" in topic:
-                    store.add_handoff(value)
-                    await manager.broadcast({
-                        "type": "handoff",
                         **value
                     })
         

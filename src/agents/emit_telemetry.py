@@ -1,15 +1,19 @@
 """
-Sample agent that emits telemetry spans and traces to Kafka.
-Designed for validating end-to-end telemetry flow in Kubernetes.
+Sample agent that demonstrates inter-agent communication via Kafka queues.
+Periodically sends messages to a target agent's queue and records errors.
+Designed for validating end-to-end flow in Kubernetes.
 """
 
 import asyncio
 import logging
 import os
-from typing import Optional
+import random
 
 from src.telemetry.collector import TelemetryCollector
-from src.telemetry.schemas import AgentSpan, SpanKind, KAFKA_TOPICS
+from src.telemetry.schemas import (
+    AgentSpan, SpanKind,
+    AgentMessage, MessageType, MessagePriority, agent_queue_topic
+)
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +56,7 @@ async def emit_loop():
     iteration = 0
     try:
         while True:
+            # Create an internal trace for tracking
             trace = collector.create_trace(
                 user_input=f"sample task {iteration}",
                 session_id=f"sample-session-{agent_id}",
@@ -59,59 +64,46 @@ async def emit_loop():
                 metadata={"agent": agent_name, "iteration": iteration}
             )
 
-            span = AgentSpan(
+            # Use the span context manager (tracked internally, not sent to Kafka)
+            async with collector.span(
                 trace_id=trace.trace_id,
                 agent_id=agent_id,
                 agent_name=agent_name,
                 span_kind=SpanKind.AGENT
-            )
-            span.input_data = {"iteration": iteration, "note": "sample work"}
+            ) as span:
+                span.input_data = {"iteration": iteration, "note": "sample work"}
+                logger.info(f"{agent_name} working on iteration {iteration}")
+                await asyncio.sleep(work_seconds)
+                span.output_data = {"status": "ok", "iteration": iteration}
 
-            # Emit a running span first (to show active tasks)
-            await collector._send(
-                KAFKA_TOPICS["spans"],
-                span.span_id,
-                span.to_dict()
-            )
-            await collector.emit_event(
-                trace_id=trace.trace_id,
-                span_id=span.span_id,
-                event_type="agent_heartbeat",
-                agent_id=agent_id,
-                agent_name=agent_name,
-                message=f"{agent_name} started work",
-                data={"iteration": iteration}
-            )
-
-            await asyncio.sleep(work_seconds)
-
-            span.complete(output={"status": "ok", "iteration": iteration})
-            await collector.record_span(span)
-            
-            # Record span metrics to the metrics topic
-            await collector.record_metrics(
-                trace_id=trace.trace_id,
-                agent_id=agent_id,
-                agent_name=agent_name,
-                metrics={
-                    "span_id": span.span_id,
-                    "span_kind": span.span_kind.value,
-                    "duration_ms": span.duration_ms,
-                    "status": span.status.value,
-                    "iteration": iteration
-                }
-            )
-
+            # Send a message to target agent's queue (inter-agent communication)
             if target_agent:
-                await collector.record_handoff(
+                msg = AgentMessage(
+                    source_agent=agent_name,
+                    target_agent=target_agent,
+                    message_type=MessageType.TASK,
+                    priority=MessagePriority.NORMAL,
+                    payload={"task": "sample_work", "iteration": iteration},
                     trace_id=trace.trace_id,
-                    source_agent_id=agent_id,
-                    source_agent_name=agent_name,
-                    target_agent_id=target_agent.lower().replace(" ", "-"),
-                    target_agent_name=target_agent,
-                    reason="Sample handoff",
-                    context={"iteration": iteration}
+                    span_id=span.span_id,
+                    reason=f"Sample task from {agent_name} iteration {iteration}"
                 )
+                await collector.send_to_agent(msg)
+
+            # Occasionally simulate an error (sent to Kafka errors topic)
+            if random.random() < 0.1:
+                try:
+                    raise RuntimeError(
+                        f"Simulated error in {agent_name} at iteration {iteration}"
+                    )
+                except Exception as e:
+                    await collector.record_error_from_exception(
+                        exception=e,
+                        trace_id=trace.trace_id,
+                        agent_name=agent_name,
+                        agent_id=agent_id,
+                        operation=f"sample_work_iteration_{iteration}"
+                    )
 
             await collector.complete_trace(
                 trace.trace_id,

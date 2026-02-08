@@ -788,12 +788,8 @@ class KafkaMessage:
         }
 
 
-# Telemetry topic definitions (observability — NOT inter-agent communication)
+# Telemetry topic — only errors are sent to Kafka.
+# Inter-agent communication uses agent-queue-{name} topics (see AGENT_QUEUE_PREFIX).
 KAFKA_TOPICS = {
-    "spans": "agent-telemetry-spans",
-    "traces": "agent-telemetry-traces", 
-    "events": "agent-telemetry-events",
-    "handoffs": "agent-telemetry-handoffs",
-    "metrics": "agent-telemetry-metrics",
     "errors": "agent-telemetry-errors"
 }
