@@ -8,7 +8,9 @@ from .schemas import (
     AgentSpan, AgentTrace, AgentHandoff, DebugEvent,
     TokenUsage, LLMMessage, ToolDefinition, ToolInvocation,
     DetailedError, AgentStatus, SpanKind, ErrorSeverity, ErrorCategory,
-    KAFKA_TOPICS
+    AgentMessage, MessageType, MessagePriority,
+    KAFKA_TOPICS, AGENT_QUEUE_PREFIX, DEFAULT_AGENT_NAMES,
+    agent_queue_topic
 )
 
 from .collector import (
@@ -61,7 +63,9 @@ __all__ = [
     "AgentSpan", "AgentTrace", "AgentHandoff", "DebugEvent",
     "TokenUsage", "LLMMessage", "ToolDefinition", "ToolInvocation",
     "DetailedError", "AgentStatus", "SpanKind", "ErrorSeverity", "ErrorCategory",
-    "KAFKA_TOPICS",
+    "AgentMessage", "MessageType", "MessagePriority",
+    "KAFKA_TOPICS", "AGENT_QUEUE_PREFIX", "DEFAULT_AGENT_NAMES",
+    "agent_queue_topic",
 
     # Collector
     "TelemetryCollector", "InMemoryTelemetryCollector",

@@ -389,18 +389,29 @@ class ClaudeDiagnosticAnalyzer:
         spans: List[Dict[str, Any]],
         events: List[Dict[str, Any]],
         oracle_state: Optional[Dict[str, Any]] = None,
-        time_window_minutes: int = 15
+        time_window_minutes: int = 15,
+        stored_errors: Optional[List[Dict[str, Any]]] = None
     ) -> DiagnosticBundle:
         """
         Analyze telemetry data and generate a diagnostic bundle.
+        
+        Args:
+            stored_errors: DetailedError records from the agent-telemetry-errors
+                          Kafka topic. When provided, these are used for richer
+                          error analysis with stack traces, classifications,
+                          and suggested fixes.
         """
         bundle = DiagnosticBundle(time_window_minutes=time_window_minutes)
 
         # Analyze performance
         bundle.performance = self._analyze_performance(traces, spans, time_window_minutes)
 
-        # Analyze errors
-        bundle.recent_errors = self._analyze_errors(traces, spans, events)
+        # Analyze errors - use stored DetailedErrors when available
+        if stored_errors:
+            bundle.recent_errors = self._analyze_stored_errors(stored_errors)
+        else:
+            bundle.recent_errors = self._analyze_errors(traces, spans, events)
+        
         if bundle.performance:
             bundle.error_rate = 1 - bundle.performance.success_rate
 
@@ -412,8 +423,8 @@ class ClaudeDiagnosticAnalyzer:
         # Find slow traces
         bundle.slow_traces = self._find_slow_traces(traces, spans)
 
-        # Identify issues
-        bundle.issues = self._identify_issues(bundle, oracle_state)
+        # Identify issues - pass stored errors for deeper analysis
+        bundle.issues = self._identify_issues(bundle, oracle_state, stored_errors)
 
         # Count issues by severity
         for issue in bundle.issues:
@@ -437,7 +448,9 @@ class ClaudeDiagnosticAnalyzer:
 
         # Generate summaries
         bundle.system_summary = self._generate_system_summary(bundle)
-        bundle.debugging_context = self._generate_debugging_context(bundle, oracle_state)
+        bundle.debugging_context = self._generate_debugging_context(
+            bundle, oracle_state, stored_errors
+        )
 
         return bundle
 
@@ -580,6 +593,71 @@ class ClaudeDiagnosticAnalyzer:
         # Sort by count descending
         return sorted(summaries, key=lambda x: x.count, reverse=True)
 
+    def _analyze_stored_errors(
+        self,
+        stored_errors: List[Dict[str, Any]]
+    ) -> List[ErrorSummary]:
+        """
+        Analyze errors from the dedicated agent-telemetry-errors Kafka topic.
+        These are rich DetailedError objects with classification, stack traces,
+        and suggested fixes already attached.
+        """
+        error_map: Dict[str, Dict] = {}
+
+        for error in stored_errors:
+            error_type = error.get("error_type", "UnknownError")
+            category = error.get("category", "unknown")
+            key = f"{category}:{error_type}"
+
+            if key not in error_map:
+                error_map[key] = {
+                    "error_type": error_type,
+                    "error_category": category,
+                    "count": 0,
+                    "first_seen": datetime.utcnow(),
+                    "last_seen": datetime.utcnow(),
+                    "affected_agents": set(),
+                    "sample_message": error.get("error_message", "No message"),
+                    "sample_trace_id": error.get("trace_id"),
+                    # Rich data from DetailedError
+                    "severities": set(),
+                    "stack_traces": [],
+                    "suggested_fixes": set(),
+                    "retryable_count": 0
+                }
+
+            error_map[key]["count"] += 1
+            if error.get("agent_name"):
+                error_map[key]["affected_agents"].add(error["agent_name"])
+            if error.get("severity"):
+                error_map[key]["severities"].add(error["severity"])
+            if error.get("stack_trace"):
+                # Keep at most 3 unique stack traces per error type
+                traces = error_map[key]["stack_traces"]
+                if len(traces) < 3:
+                    traces.append(error["stack_trace"][:500])
+            if error.get("suggested_fixes"):
+                for fix in error["suggested_fixes"]:
+                    error_map[key]["suggested_fixes"].add(fix)
+            if error.get("is_retryable"):
+                error_map[key]["retryable_count"] += 1
+
+        # Convert to ErrorSummary objects
+        summaries = []
+        for data in error_map.values():
+            summaries.append(ErrorSummary(
+                error_type=data["error_type"],
+                error_category=data["error_category"],
+                count=data["count"],
+                first_seen=data["first_seen"],
+                last_seen=data["last_seen"],
+                affected_agents=list(data["affected_agents"]),
+                sample_message=data["sample_message"],
+                sample_trace_id=data["sample_trace_id"]
+            ))
+
+        return sorted(summaries, key=lambda x: x.count, reverse=True)
+
     def _categorize_error(self, error_type: str) -> str:
         """Categorize error by type"""
         error_type_lower = error_type.lower()
@@ -696,11 +774,51 @@ class ClaudeDiagnosticAnalyzer:
     def _identify_issues(
         self,
         bundle: DiagnosticBundle,
-        oracle_state: Optional[Dict[str, Any]]
+        oracle_state: Optional[Dict[str, Any]],
+        stored_errors: Optional[List[Dict[str, Any]]] = None
     ) -> List[DiagnosticIssue]:
         """Identify issues from the analysis"""
         issues = []
         issue_id = 0
+
+        # Check for critical errors from the dedicated errors store
+        if stored_errors:
+            critical_errors = [
+                e for e in stored_errors if e.get("severity") == "critical"
+            ]
+            if critical_errors:
+                issue_id += 1
+                affected = list(set(
+                    e.get("agent_name") for e in critical_errors if e.get("agent_name")
+                ))
+                issues.append(DiagnosticIssue(
+                    id=f"issue_{issue_id}",
+                    category=IssueCategory.ERROR,
+                    severity=DiagnosticSeverity.CRITICAL,
+                    title=f"Critical Errors Detected: {len(critical_errors)} occurrence(s)",
+                    description=(
+                        f"Critical errors found in error logs: "
+                        f"{critical_errors[0].get('error_type', 'Unknown')}: "
+                        f"{critical_errors[0].get('error_message', 'No message')[:200]}"
+                    ),
+                    affected_components=affected[:5],
+                    suggested_actions=list(set(
+                        fix
+                        for e in critical_errors
+                        for fix in (e.get("suggested_fixes") or [])
+                    ))[:5] or [
+                        "Review critical error stack traces immediately",
+                        "Check system resource utilization",
+                        "Verify external service connectivity"
+                    ],
+                    related_trace_ids=list(set(
+                        e.get("trace_id") for e in critical_errors if e.get("trace_id")
+                    ))[:5],
+                    metadata={
+                        "error_count": len(critical_errors),
+                        "error_ids": [e.get("error_id") for e in critical_errors[:5]]
+                    }
+                ))
 
         # High error rate
         if bundle.error_rate > self.error_rate_threshold:
@@ -907,7 +1025,8 @@ class ClaudeDiagnosticAnalyzer:
     def _generate_debugging_context(
         self,
         bundle: DiagnosticBundle,
-        oracle_state: Optional[Dict[str, Any]]
+        oracle_state: Optional[Dict[str, Any]],
+        stored_errors: Optional[List[Dict[str, Any]]] = None
     ) -> str:
         """Generate context helpful for debugging"""
         context_parts = []
@@ -919,8 +1038,27 @@ class ClaudeDiagnosticAnalyzer:
                 agent_names = [a.get("name") for a in agents]
                 context_parts.append(f"Active agents: {', '.join(agent_names)}")
 
-        # Error patterns
-        if bundle.recent_errors:
+        # Error patterns from dedicated error store
+        if stored_errors:
+            total_errors = len(stored_errors)
+            by_severity = {}
+            for e in stored_errors:
+                sev = e.get("severity", "unknown")
+                by_severity[sev] = by_severity.get(sev, 0) + 1
+            
+            severity_summary = ", ".join(
+                f"{sev}={count}" for sev, count in sorted(by_severity.items())
+            )
+            context_parts.append(
+                f"Error store: {total_errors} errors ({severity_summary})"
+            )
+            
+            # Show unique error categories
+            categories = set(e.get("category", "unknown") for e in stored_errors)
+            context_parts.append(f"Error categories: {', '.join(sorted(categories))}")
+
+        # Fallback: error patterns from spans/events
+        elif bundle.recent_errors:
             top_errors = bundle.recent_errors[:3]
             error_summary = "; ".join([f"{e.error_type}({e.count}x)" for e in top_errors])
             context_parts.append(f"Top errors: {error_summary}")
@@ -941,11 +1079,16 @@ async def get_diagnostic_bundle(
     spans: List[Dict[str, Any]],
     events: List[Dict[str, Any]],
     oracle_state: Optional[Dict[str, Any]] = None,
-    time_window_minutes: int = 15
+    time_window_minutes: int = 15,
+    stored_errors: Optional[List[Dict[str, Any]]] = None
 ) -> DiagnosticBundle:
     """
     Quick access to diagnostic bundle generation.
     Use this in API endpoints.
+    
+    Args:
+        stored_errors: DetailedError records from the agent-telemetry-errors
+                      Kafka topic for richer error analysis.
     """
     analyzer = ClaudeDiagnosticAnalyzer()
     return await analyzer.analyze(
@@ -953,5 +1096,6 @@ async def get_diagnostic_bundle(
         spans=spans,
         events=events,
         oracle_state=oracle_state,
-        time_window_minutes=time_window_minutes
+        time_window_minutes=time_window_minutes,
+        stored_errors=stored_errors
     )

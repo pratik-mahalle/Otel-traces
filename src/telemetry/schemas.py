@@ -652,7 +652,123 @@ class DebugEvent:
         return json.dumps(self.to_dict(), default=str)
 
 
+# ============================================================================
+# Inter-Agent Communication Schemas
+# ============================================================================
+
+class MessageType(str, Enum):
+    """Types of messages exchanged between agents via Kafka queues"""
+    TASK = "task"             # Task assignment from one agent to another
+    RESULT = "result"         # Result returned to the requesting agent
+    ERROR = "error"           # Error notification to the requesting agent
+    HEARTBEAT = "heartbeat"   # Agent liveness signal
+    CANCEL = "cancel"         # Task cancellation request
+
+
+class MessagePriority(str, Enum):
+    """Priority levels for inter-agent messages"""
+    LOW = "low"
+    NORMAL = "normal"
+    HIGH = "high"
+    CRITICAL = "critical"
+
+
+# Prefix for per-agent Kafka queue topics
+AGENT_QUEUE_PREFIX = "agent-queue-"
+
+# Default agent names whose queues are pre-created
+DEFAULT_AGENT_NAMES = ["orchestrator", "researcher", "writer", "coder", "reviewer"]
+
+
+def agent_queue_topic(agent_name: str) -> str:
+    """
+    Generate a Kafka topic name for an agent's personal queue.
+    
+    Pattern: agent-queue-{agent_name_lowercase}
+    Example: agent_queue_topic("Researcher") -> "agent-queue-researcher"
+    """
+    return f"{AGENT_QUEUE_PREFIX}{agent_name.lower().replace(' ', '-')}"
+
+
+@dataclass
+class AgentMessage:
+    """
+    A message exchanged between agents via their Kafka queues.
+    
+    This is the unit of inter-agent communication.  The routing pattern is:
+        Agent1 writes -> agent-queue-{Agent2}   (Agent2's queue)
+        Agent2 reads  <- agent-queue-{Agent2}   (its own queue)
+    
+    When Agent2 finishes, it writes the result back:
+        Agent2 writes -> agent-queue-{Agent1}   (Agent1's queue)
+        Agent1 reads  <- agent-queue-{Agent1}   (its own queue)
+    """
+    # Identifiers
+    message_id: str = field(default_factory=lambda: str(uuid4()))
+    
+    # Routing
+    source_agent: str = ""          # Name of the sending agent
+    target_agent: str = ""          # Name of the receiving agent
+    
+    # Message classification
+    message_type: MessageType = MessageType.TASK
+    priority: MessagePriority = MessagePriority.NORMAL
+    
+    # Payload
+    payload: Dict[str, Any] = field(default_factory=dict)
+    
+    # Tracing context - links queue messages to telemetry traces
+    trace_id: Optional[str] = None
+    span_id: Optional[str] = None
+    parent_message_id: Optional[str] = None  # For result → links back to original task
+    
+    # Metadata
+    reason: str = ""                # Human-readable reason for the message
+    timestamp: datetime = field(default_factory=datetime.utcnow)
+    ttl_seconds: Optional[int] = None  # Time-to-live; None = no expiry
+    
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "message_id": self.message_id,
+            "source_agent": self.source_agent,
+            "target_agent": self.target_agent,
+            "message_type": self.message_type.value,
+            "priority": self.priority.value,
+            "payload": self.payload,
+            "trace_id": self.trace_id,
+            "span_id": self.span_id,
+            "parent_message_id": self.parent_message_id,
+            "reason": self.reason,
+            "timestamp": self.timestamp.isoformat(),
+            "ttl_seconds": self.ttl_seconds
+        }
+    
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> 'AgentMessage':
+        """Reconstruct an AgentMessage from a Kafka consumer dict"""
+        return cls(
+            message_id=data.get("message_id", str(uuid4())),
+            source_agent=data.get("source_agent", ""),
+            target_agent=data.get("target_agent", ""),
+            message_type=MessageType(data.get("message_type", "task")),
+            priority=MessagePriority(data.get("priority", "normal")),
+            payload=data.get("payload", {}),
+            trace_id=data.get("trace_id"),
+            span_id=data.get("span_id"),
+            parent_message_id=data.get("parent_message_id"),
+            reason=data.get("reason", ""),
+            timestamp=datetime.fromisoformat(data["timestamp"]) if "timestamp" in data else datetime.utcnow(),
+            ttl_seconds=data.get("ttl_seconds")
+        )
+    
+    def to_json(self) -> str:
+        return json.dumps(self.to_dict(), default=str)
+
+
+# ============================================================================
 # Kafka message schemas
+# ============================================================================
+
 @dataclass
 class KafkaMessage:
     """Wrapper for Kafka messages"""
@@ -672,7 +788,7 @@ class KafkaMessage:
         }
 
 
-# Topic definitions
+# Telemetry topic definitions (observability — NOT inter-agent communication)
 KAFKA_TOPICS = {
     "spans": "agent-telemetry-spans",
     "traces": "agent-telemetry-traces", 

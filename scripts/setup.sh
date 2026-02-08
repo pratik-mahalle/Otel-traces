@@ -169,7 +169,14 @@ create_kafka_topics() {
     KAFKA_POD=$(kubectl -n telemetry get pods -l app=kafka -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo "")
     
     if [ -n "$KAFKA_POD" ]; then
-        TOPICS=("agent-telemetry-spans" "agent-telemetry-traces" "agent-telemetry-events" "agent-telemetry-handoffs" "agent-telemetry-metrics" "agent-telemetry-errors")
+        # Telemetry topics (observability)
+        TELEMETRY_TOPICS=("agent-telemetry-spans" "agent-telemetry-traces" "agent-telemetry-events" "agent-telemetry-handoffs" "agent-telemetry-metrics" "agent-telemetry-errors")
+        
+        # Inter-agent communication queues (one per agent)
+        AGENT_QUEUE_TOPICS=("agent-queue-orchestrator" "agent-queue-researcher" "agent-queue-writer" "agent-queue-coder" "agent-queue-reviewer")
+        
+        # Combine both sets
+        TOPICS=("${TELEMETRY_TOPICS[@]}" "${AGENT_QUEUE_TOPICS[@]}")
         
         for topic in "${TOPICS[@]}"; do
             kubectl -n telemetry exec "$KAFKA_POD" -- sh -c "\

@@ -15,7 +15,9 @@ from uuid import uuid4
 from ..telemetry.collector import TelemetryCollector, InMemoryTelemetryCollector
 from ..telemetry.litellm_integration import TracedLiteLLM
 from ..telemetry.schemas import (
-    AgentSpan, SpanKind, ToolDefinition, ToolInvocation
+    AgentSpan, SpanKind, ToolDefinition, ToolInvocation,
+    DetailedError, ErrorCategory, ErrorSeverity,
+    AgentMessage, MessageType, MessagePriority, agent_queue_topic
 )
 
 logger = logging.getLogger(__name__)
@@ -37,6 +39,12 @@ class BaseAgent(ABC):
     """
     Base class for agents with built-in telemetry support.
     All agents should inherit from this class.
+    
+    Each agent has its own Kafka queue:
+        agent-queue-{agent_name_lowercase}
+    
+    Other agents send tasks by writing to this queue.
+    This agent reads from its own queue to receive work.
     """
     
     def __init__(
@@ -55,27 +63,128 @@ class BaseAgent(ABC):
         # Current trace context
         self._trace_id: Optional[str] = None
         self._parent_span_id: Optional[str] = None
+        
+        # Queue for receiving results back from other agents
+        self._pending_results: Dict[str, asyncio.Future] = {}
+        self._queue_consumer_task: Optional[asyncio.Task] = None
     
     def set_trace_context(self, trace_id: str, parent_span_id: Optional[str] = None):
         """Set the current trace context for this agent"""
         self._trace_id = trace_id
         self._parent_span_id = parent_span_id
     
+    @property
+    def queue_topic(self) -> str:
+        """The Kafka topic for this agent's personal queue"""
+        return agent_queue_topic(self.name)
+    
+    async def start_queue_consumer(self):
+        """
+        Start consuming messages from this agent's own Kafka queue.
+        
+        Messages arrive as AgentMessage objects. Task messages trigger
+        run(), and results are routed to pending futures.
+        """
+        async def _handle_queue_message(msg: AgentMessage):
+            await self._process_queue_message(msg)
+        
+        self._queue_consumer_task = asyncio.create_task(
+            self.collector.consume_agent_queue(self.name, _handle_queue_message)
+        )
+        logger.info(f"Agent '{self.name}' started queue consumer on {self.queue_topic}")
+    
+    async def _process_queue_message(self, msg: AgentMessage):
+        """
+        Process an incoming message from this agent's queue.
+        
+        - TASK messages: execute run() and send result back to source agent
+        - RESULT/ERROR messages: resolve a pending future so the caller unblocks
+        """
+        if msg.message_type == MessageType.TASK:
+            # Set trace context from the incoming message
+            if msg.trace_id:
+                self.set_trace_context(msg.trace_id, msg.span_id)
+            
+            try:
+                result = await self.run(msg.payload)
+                
+                # Send the result back to the source agent's queue
+                result_msg = AgentMessage(
+                    source_agent=self.name,
+                    target_agent=msg.source_agent,
+                    message_type=MessageType.RESULT,
+                    payload=result,
+                    trace_id=msg.trace_id,
+                    parent_message_id=msg.message_id,
+                    reason=f"Result for: {msg.reason}"
+                )
+                await self.collector.send_to_agent(result_msg)
+                
+            except Exception as e:
+                # Send an error message back to the source agent's queue
+                error_msg = AgentMessage(
+                    source_agent=self.name,
+                    target_agent=msg.source_agent,
+                    message_type=MessageType.ERROR,
+                    payload={"error": str(e), "error_type": type(e).__name__},
+                    trace_id=msg.trace_id,
+                    parent_message_id=msg.message_id,
+                    reason=f"Error processing: {msg.reason}"
+                )
+                await self.collector.send_to_agent(error_msg)
+                
+                # Also record to the telemetry error store
+                await self.collector.record_error_from_exception(
+                    exception=e,
+                    trace_id=msg.trace_id,
+                    agent_name=self.name,
+                    agent_id=self.agent_id,
+                    operation=f"queue_task:{msg.reason}"
+                )
+        
+        elif msg.message_type in (MessageType.RESULT, MessageType.ERROR):
+            # Resolve a pending future if this is a response to a task we sent
+            parent_id = msg.parent_message_id
+            if parent_id and parent_id in self._pending_results:
+                future = self._pending_results.pop(parent_id)
+                if msg.message_type == MessageType.ERROR:
+                    future.set_exception(
+                        RuntimeError(
+                            f"Agent {msg.source_agent} failed: "
+                            f"{msg.payload.get('error', 'Unknown error')}"
+                        )
+                    )
+                else:
+                    future.set_result(msg.payload)
+    
     async def think(self, messages: List[Dict[str, Any]]) -> str:
         """Make an LLM call with telemetry"""
         if not self._trace_id:
             raise ValueError("Trace context not set. Call set_trace_context first.")
         
-        response = await self.llm.completion(
-            trace_id=self._trace_id,
-            agent_id=self.agent_id,
-            agent_name=self.name,
-            messages=messages,
-            model=self.config.model,
-            parent_span_id=self._parent_span_id
-        )
-        
-        return response.choices[0].message.content
+        try:
+            response = await self.llm.completion(
+                trace_id=self._trace_id,
+                agent_id=self.agent_id,
+                agent_name=self.name,
+                messages=messages,
+                model=self.config.model,
+                parent_span_id=self._parent_span_id
+            )
+            
+            return response.choices[0].message.content
+        except Exception as e:
+            # Record LLM error to the dedicated Kafka errors topic
+            await self.collector.record_error_from_exception(
+                exception=e,
+                trace_id=self._trace_id,
+                agent_name=self.name,
+                agent_id=self.agent_id,
+                operation=f"llm_call:{self.config.model}",
+                model_name=self.config.model,
+                prompt_preview=str(messages[-1].get("content", ""))[:500] if messages else None
+            )
+            raise
     
     async def execute_tool(
         self,
@@ -119,6 +228,18 @@ class BaseAgent(ABC):
             except Exception as e:
                 invocation.error = str(e)
                 span.tool_invocations.append(invocation)
+                
+                # Record tool error to the dedicated Kafka errors topic
+                await self.collector.record_error_from_exception(
+                    exception=e,
+                    trace_id=self._trace_id,
+                    span_id=span.span_id,
+                    agent_name=self.name,
+                    agent_id=self.agent_id,
+                    operation=f"tool_call:{tool_name}",
+                    tool_name=tool_name,
+                    tool_parameters=parameters
+                )
                 raise
     
     @abstractmethod
@@ -153,28 +274,77 @@ class OrchestratorAgent(BaseAgent):
         reason: str,
         context: Dict[str, Any]
     ) -> Dict[str, Any]:
-        """Hand off control to another agent"""
+        """
+        Hand off a task to another agent via its Kafka queue.
+        
+        Flow:
+            1. Orchestrator writes AgentMessage(type=TASK) -> agent-queue-{target}
+            2. Target agent reads from its own queue
+            3. Target agent processes and writes AgentMessage(type=RESULT) -> agent-queue-orchestrator
+            4. Orchestrator reads the result from its own queue
+        """
         if target_agent_name not in self.sub_agents:
-            raise ValueError(f"Agent {target_agent_name} not found")
+            error = ValueError(f"Agent {target_agent_name} not found")
+            # Record handoff error to telemetry errors topic
+            await self.collector.record_error_from_exception(
+                exception=error,
+                trace_id=self._trace_id,
+                agent_name=self.name,
+                agent_id=self.agent_id,
+                operation=f"handoff_to:{target_agent_name}"
+            )
+            raise error
         
         target_agent = self.sub_agents[target_agent_name]
         
-        # Record the handoff
-        await self.collector.record_handoff(
+        # Build the inter-agent message
+        task_msg = AgentMessage(
+            source_agent=self.name,
+            target_agent=target_agent_name,
+            message_type=MessageType.TASK,
+            priority=MessagePriority.NORMAL,
+            payload=context,
             trace_id=self._trace_id,
-            source_agent_id=self.agent_id,
-            source_agent_name=self.name,
-            target_agent_id=target_agent.agent_id,
-            target_agent_name=target_agent.name,
-            reason=reason,
-            context=context
+            span_id=self._parent_span_id,
+            reason=reason
         )
         
-        # Set trace context on target agent
-        target_agent.set_trace_context(self._trace_id, self._parent_span_id)
+        # Register a future to receive the result
+        result_future: asyncio.Future = asyncio.get_event_loop().create_future()
+        self._pending_results[task_msg.message_id] = result_future
         
-        # Run the target agent
-        return await target_agent.run(context)
+        # Send the task to the target agent's queue via Kafka
+        # (send_to_agent also records a telemetry handoff event)
+        await self.collector.send_to_agent(task_msg)
+        
+        try:
+            # Wait for the result to come back on our own queue
+            result = await asyncio.wait_for(result_future, timeout=300)
+            return result
+        except asyncio.TimeoutError:
+            self._pending_results.pop(task_msg.message_id, None)
+            error = TimeoutError(
+                f"Handoff to {target_agent_name} timed out after 300s"
+            )
+            await self.collector.record_error_from_exception(
+                exception=error,
+                trace_id=self._trace_id,
+                agent_name=self.name,
+                agent_id=self.agent_id,
+                operation=f"handoff_timeout:{target_agent_name}"
+            )
+            raise error
+        except Exception as e:
+            self._pending_results.pop(task_msg.message_id, None)
+            # Record the downstream agent failure
+            await self.collector.record_error_from_exception(
+                exception=e,
+                trace_id=self._trace_id,
+                agent_name=self.name,
+                agent_id=self.agent_id,
+                operation=f"handoff_execution:{target_agent_name}"
+            )
+            raise
     
     async def run(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
         """Run the orchestrator"""
@@ -409,7 +579,18 @@ class ReflectionAgent(BaseAgent):
 
 
 async def create_demo_system(collector: TelemetryCollector) -> OrchestratorAgent:
-    """Create a demo multi-agent system with telemetry"""
+    """
+    Create a demo multi-agent system with Kafka queue-based communication.
+    
+    Each agent gets its own Kafka queue:
+        agent-queue-orchestrator
+        agent-queue-researcher
+        agent-queue-writer
+        agent-queue-coder
+        agent-queue-reviewer
+    
+    Agents communicate by writing to each other's queues.
+    """
     llm = TracedLiteLLM(
         collector=collector,
         default_model="ollama/llama2",
@@ -478,6 +659,11 @@ async def create_demo_system(collector: TelemetryCollector) -> OrchestratorAgent
     orchestrator.register_agent(writer)
     orchestrator.register_agent(coder)
     orchestrator.register_agent(reviewer)
+    
+    # Start queue consumers so each agent reads from its own Kafka queue
+    all_agents = [orchestrator, researcher, writer, coder, reviewer]
+    for agent in all_agents:
+        await agent.start_queue_consumer()
     
     return orchestrator
 

@@ -34,6 +34,10 @@ from ..telemetry.claude_integration import (
     get_diagnostic_bundle
 )
 from ..oracle.state_schema import ORACLE_MONITOR_SCHEMA
+from ..telemetry.schemas import (
+    AGENT_QUEUE_PREFIX, DEFAULT_AGENT_NAMES, agent_queue_topic,
+    AgentMessage
+)
 
 logger = logging.getLogger(__name__)
 
@@ -93,6 +97,9 @@ class TelemetryStore:
         self.spans: Dict[str, Dict] = {}
         self.events: List[Dict] = []
         self.handoffs: List[Dict] = []
+        self.errors: List[Dict] = []       # Dedicated error storage
+        self.metrics: List[Dict] = []      # Dedicated metrics storage
+        self.agent_messages: List[Dict] = []  # Inter-agent queue messages (observed)
     
     def add_trace(self, trace: Dict):
         self.traces[trace["trace_id"]] = trace
@@ -109,6 +116,71 @@ class TelemetryStore:
     def add_handoff(self, handoff: Dict):
         self.handoffs.append(handoff)
     
+    def add_error(self, error: Dict):
+        """Store a DetailedError from the agent-telemetry-errors topic"""
+        self.errors.append(error)
+        # Keep only last 5000 errors
+        if len(self.errors) > 5000:
+            self.errors = self.errors[-5000:]
+    
+    def add_metric(self, metric: Dict):
+        """Store a metric from the agent-telemetry-metrics topic"""
+        self.metrics.append(metric)
+        # Keep only last 10000 metrics
+        if len(self.metrics) > 10000:
+            self.metrics = self.metrics[-10000:]
+    
+    def add_agent_message(self, message: Dict):
+        """Store an observed inter-agent queue message"""
+        self.agent_messages.append(message)
+        # Keep only last 10000 agent messages
+        if len(self.agent_messages) > 10000:
+            self.agent_messages = self.agent_messages[-10000:]
+    
+    def get_agent_queue_messages(self, agent_name: str) -> List[Dict]:
+        """Get all messages targeted at a specific agent's queue"""
+        return [
+            m for m in self.agent_messages
+            if m.get("target_agent", "").lower() == agent_name.lower()
+        ]
+    
+    def get_agent_queue_pending(self, agent_name: str) -> List[Dict]:
+        """Get pending (unresolved) task messages for an agent"""
+        # A task is pending if there is no result message with the same parent_message_id
+        tasks = [
+            m for m in self.agent_messages
+            if m.get("target_agent", "").lower() == agent_name.lower()
+            and m.get("message_type") == "task"
+        ]
+        result_parent_ids = {
+            m.get("parent_message_id")
+            for m in self.agent_messages
+            if m.get("message_type") in ("result", "error")
+            and m.get("parent_message_id")
+        }
+        return [t for t in tasks if t.get("message_id") not in result_parent_ids]
+    
+    def get_all_queue_states(self) -> List[Dict[str, Any]]:
+        """Get a summary of all agent queues"""
+        agents = set()
+        for m in self.agent_messages:
+            agents.add(m.get("source_agent", "").lower())
+            agents.add(m.get("target_agent", "").lower())
+        agents.discard("")
+        
+        queues = []
+        for agent in sorted(agents):
+            pending = self.get_agent_queue_pending(agent)
+            total = len(self.get_agent_queue_messages(agent))
+            queues.append({
+                "agent_name": agent,
+                "queue_topic": f"{AGENT_QUEUE_PREFIX}{agent}",
+                "total_messages": total,
+                "pending_tasks": len(pending),
+                "pending": pending
+            })
+        return queues
+    
     def get_trace(self, trace_id: str) -> Optional[Dict]:
         return self.traces.get(trace_id)
     
@@ -120,6 +192,53 @@ class TelemetryStore:
     
     def get_handoffs_for_trace(self, trace_id: str) -> List[Dict]:
         return [h for h in self.handoffs if h.get("trace_id") == trace_id]
+    
+    def get_errors_for_trace(self, trace_id: str) -> List[Dict]:
+        """Get all errors for a specific trace"""
+        return [e for e in self.errors if e.get("trace_id") == trace_id]
+    
+    def get_errors_by_severity(self, severity: str) -> List[Dict]:
+        """Get errors filtered by severity (critical, error, warning, info)"""
+        return [e for e in self.errors if e.get("severity") == severity]
+    
+    def get_errors_by_category(self, category: str) -> List[Dict]:
+        """Get errors filtered by category (llm_error, agent_error, etc.)"""
+        return [e for e in self.errors if e.get("category") == category]
+    
+    def get_errors_by_agent(self, agent_name: str) -> List[Dict]:
+        """Get errors filtered by agent name"""
+        return [e for e in self.errors if e.get("agent_name") == agent_name]
+    
+    def get_recent_errors(self, limit: int = 50) -> List[Dict]:
+        """Get most recent errors"""
+        return self.errors[-limit:]
+    
+    def get_error_summary(self) -> Dict[str, Any]:
+        """Get a summary of all stored errors for debugging"""
+        total = len(self.errors)
+        by_severity = {}
+        by_category = {}
+        by_agent = {}
+        
+        for error in self.errors:
+            sev = error.get("severity", "unknown")
+            cat = error.get("category", "unknown")
+            agent = error.get("agent_name", "unknown")
+            
+            by_severity[sev] = by_severity.get(sev, 0) + 1
+            by_category[cat] = by_category.get(cat, 0) + 1
+            by_agent[agent] = by_agent.get(agent, 0) + 1
+        
+        return {
+            "total_errors": total,
+            "by_severity": by_severity,
+            "by_category": by_category,
+            "by_agent": by_agent
+        }
+    
+    def get_metrics_for_trace(self, trace_id: str) -> List[Dict]:
+        """Get all metrics for a specific trace"""
+        return [m for m in self.metrics if m.get("trace_id") == trace_id]
     
     def search_traces(self, query: TraceQuery) -> List[Dict]:
         results = list(self.traces.values())
@@ -228,14 +347,24 @@ async def lifespan(app: FastAPI):
     )
     logger.info("Claude diagnostic analyzer initialized")
 
-    # Start Kafka consumer for receiving telemetry
+    # Start Kafka consumer for receiving telemetry AND observing agent queues
     kafka_servers = os.environ.get("KAFKA_BOOTSTRAP_SERVERS", "kafka:9092")
-    topics = [
+    
+    # Telemetry topics (observability data)
+    telemetry_topics = [
         "agent-telemetry-traces",
         "agent-telemetry-spans",
         "agent-telemetry-events",
-        "agent-telemetry-handoffs"
+        "agent-telemetry-handoffs",
+        "agent-telemetry-errors",
+        "agent-telemetry-metrics"
     ]
+    
+    # Agent queue topics (inter-agent communication — observed read-only)
+    agent_queue_topics = [agent_queue_topic(name) for name in DEFAULT_AGENT_NAMES]
+    
+    # Combined: telemetry + agent queues
+    topics = telemetry_topics + agent_queue_topics
 
     consumer_task = None
 
@@ -254,14 +383,50 @@ async def lifespan(app: FastAPI):
                 topic = message.topic
                 value = message.value
                 
-                # Store the message
-                if "traces" in topic:
+                # ---- Inter-agent queue messages (observed for monitoring) ----
+                if topic.startswith(AGENT_QUEUE_PREFIX):
+                    store.add_agent_message(value)
+                    # Broadcast to WebSocket clients
+                    await manager.broadcast({
+                        "type": "agent_queue_message",
+                        "queue_topic": topic,
+                        "message_type": value.get("message_type", "unknown"),
+                        "source_agent": value.get("source_agent", ""),
+                        "target_agent": value.get("target_agent", ""),
+                        "reason": value.get("reason", ""),
+                        **value
+                    })
+                    logger.debug(
+                        f"Observed queue message on {topic}: "
+                        f"{value.get('source_agent')} -> {value.get('target_agent')} "
+                        f"[{value.get('message_type')}]"
+                    )
+                # ---- Telemetry topics ----
+                elif "traces" in topic:
                     store.add_trace(value)
+                elif "errors" in topic:
+                    store.add_error(value)
+                    # Broadcast errors to WebSocket clients for real-time debugging
+                    await manager.broadcast({
+                        "type": "error",
+                        "event_type": "error_recorded",
+                        "severity": value.get("severity", "error"),
+                        "category": value.get("category", "unknown"),
+                        "message": f"[{value.get('severity', 'error').upper()}] "
+                                   f"{value.get('error_type', 'Error')}: "
+                                   f"{value.get('error_message', 'Unknown error')}",
+                        **value
+                    })
+                    logger.debug(
+                        f"Stored error: {value.get('error_id')} "
+                        f"[{value.get('severity')}] {value.get('category')}"
+                    )
+                elif "metrics" in topic:
+                    store.add_metric(value)
                 elif "spans" in topic:
                     store.add_span(value)
                 elif "events" in topic:
                     store.add_event(value)
-                    # Broadcast to connected clients
                     await manager.broadcast(value)
                 elif "handoffs" in topic:
                     store.add_handoff(value)
@@ -271,7 +436,7 @@ async def lifespan(app: FastAPI):
                     })
         
         consumer_task = asyncio.create_task(consume_messages())
-        logger.info("Kafka consumer started")
+        logger.info(f"Kafka consumer started, subscribed to {len(topics)} topics")
         
     except Exception as e:
         logger.warning(f"Kafka not available: {e}. Running in standalone mode.")
@@ -554,6 +719,218 @@ async def stream_events(trace_id: Optional[str] = None):
         event_generator(),
         media_type="text/event-stream"
     )
+
+
+# ============================================================================
+# ERROR LOG ENDPOINTS - Dedicated error querying for Claude Code debugging
+# ============================================================================
+
+@app.get("/api/v1/errors")
+async def list_errors(
+    trace_id: Optional[str] = None,
+    severity: Optional[str] = Query(default=None, enum=["critical", "error", "warning", "info"]),
+    category: Optional[str] = Query(default=None, enum=[
+        "llm_error", "agent_error", "tool_error", "handoff_error",
+        "validation_error", "timeout_error", "resource_error",
+        "network_error", "config_error", "unknown"
+    ]),
+    agent_name: Optional[str] = None,
+    limit: int = Query(default=50, le=500)
+):
+    """
+    List stored error logs with filtering.
+    
+    These errors come from the dedicated agent-telemetry-errors Kafka topic
+    and contain rich DetailedError data including:
+    - Stack traces
+    - Error classification (severity + category)
+    - Agent context (which agent, what operation)
+    - LLM/tool context
+    - Suggested fixes
+    - Retry information
+    
+    Use this endpoint for systematic error investigation.
+    """
+    errors = store.errors
+    
+    if trace_id:
+        errors = [e for e in errors if e.get("trace_id") == trace_id]
+    if severity:
+        errors = [e for e in errors if e.get("severity") == severity]
+    if category:
+        errors = [e for e in errors if e.get("category") == category]
+    if agent_name:
+        errors = [e for e in errors if e.get("agent_name") == agent_name]
+    
+    # Sort by timestamp descending (most recent first)
+    errors.sort(key=lambda x: x.get("timestamp", ""), reverse=True)
+    
+    return {
+        "total": len(errors),
+        "errors": errors[:limit],
+        "summary": store.get_error_summary()
+    }
+
+
+@app.get("/api/v1/errors/summary")
+async def get_error_summary():
+    """
+    Get a summary of all stored errors.
+    
+    Returns counts grouped by severity, category, and agent.
+    Designed for quick system health assessment.
+    """
+    return store.get_error_summary()
+
+
+@app.get("/api/v1/errors/{error_id}")
+async def get_error_detail(error_id: str):
+    """
+    Get full details for a specific error by error_id.
+    
+    Returns the complete DetailedError with stack trace,
+    context, and suggested fixes.
+    """
+    for error in store.errors:
+        if error.get("error_id") == error_id:
+            return {"error": error}
+    raise HTTPException(status_code=404, detail=f"Error {error_id} not found")
+
+
+@app.get("/api/v1/traces/{trace_id}/errors")
+async def get_trace_errors(trace_id: str):
+    """
+    Get all errors for a specific trace.
+    
+    Returns errors ordered by timestamp, with full DetailedError data
+    for each error that occurred during the trace execution.
+    """
+    errors = store.get_errors_for_trace(trace_id)
+    errors.sort(key=lambda x: x.get("timestamp", ""))
+    
+    return {
+        "trace_id": trace_id,
+        "error_count": len(errors),
+        "errors": errors
+    }
+
+
+@app.get("/api/v1/errors/agent/{agent_name}")
+async def get_agent_errors(
+    agent_name: str,
+    limit: int = Query(default=50, le=200)
+):
+    """
+    Get all errors for a specific agent.
+    
+    Useful for debugging agent-specific issues like LLM failures,
+    tool errors, or handoff problems for a particular agent.
+    """
+    errors = store.get_errors_by_agent(agent_name)
+    errors.sort(key=lambda x: x.get("timestamp", ""), reverse=True)
+    
+    return {
+        "agent_name": agent_name,
+        "error_count": len(errors),
+        "errors": errors[:limit]
+    }
+
+
+# ============================================================================
+# METRICS ENDPOINTS - Performance metrics for debugging
+# ============================================================================
+
+@app.get("/api/v1/metrics/spans")
+async def get_span_metrics(
+    trace_id: Optional[str] = None,
+    agent_name: Optional[str] = None,
+    limit: int = Query(default=100, le=1000)
+):
+    """
+    Get span-level performance metrics from the agent-telemetry-metrics topic.
+    
+    Returns timing, token usage, and status for individual spans.
+    """
+    metrics = store.metrics
+    
+    if trace_id:
+        metrics = [m for m in metrics if m.get("trace_id") == trace_id]
+    if agent_name:
+        metrics = [m for m in metrics if m.get("agent_name") == agent_name]
+    
+    metrics.sort(key=lambda x: x.get("timestamp", ""), reverse=True)
+    
+    return {
+        "total": len(metrics),
+        "metrics": metrics[:limit]
+    }
+
+
+# ============================================================================
+# AGENT QUEUE ENDPOINTS - Inter-agent communication observability
+# ============================================================================
+
+@app.get("/api/v1/queues")
+async def list_agent_queues():
+    """
+    List all observed agent queues and their current state.
+    
+    Each agent has a dedicated Kafka queue (agent-queue-{name}).
+    This endpoint shows:
+    - Total messages observed per queue
+    - Pending (unresolved) tasks
+    - Queue topic name
+    """
+    return {
+        "queues": store.get_all_queue_states(),
+        "total_messages": len(store.agent_messages)
+    }
+
+
+@app.get("/api/v1/queues/{agent_name}")
+async def get_agent_queue(
+    agent_name: str,
+    message_type: Optional[str] = Query(default=None, enum=["task", "result", "error", "heartbeat", "cancel"]),
+    limit: int = Query(default=50, le=500)
+):
+    """
+    Get messages from a specific agent's queue.
+    
+    Pattern: Agent1 writes to agent-queue-{Agent2}, Agent2 reads from it.
+    This endpoint shows what has been written to agent-queue-{agent_name}.
+    """
+    messages = store.get_agent_queue_messages(agent_name)
+    
+    if message_type:
+        messages = [m for m in messages if m.get("message_type") == message_type]
+    
+    messages.sort(key=lambda x: x.get("timestamp", ""), reverse=True)
+    pending = store.get_agent_queue_pending(agent_name)
+    
+    return {
+        "agent_name": agent_name,
+        "queue_topic": agent_queue_topic(agent_name),
+        "total_messages": len(messages),
+        "pending_tasks": len(pending),
+        "messages": messages[:limit],
+        "pending": pending[:limit]
+    }
+
+
+@app.get("/api/v1/queues/{agent_name}/pending")
+async def get_agent_pending_tasks(agent_name: str):
+    """
+    Get only the pending (unresolved) tasks in an agent's queue.
+    
+    A task is pending if no result or error response has been observed
+    with a matching parent_message_id.
+    """
+    pending = store.get_agent_queue_pending(agent_name)
+    return {
+        "agent_name": agent_name,
+        "pending_count": len(pending),
+        "tasks": pending
+    }
 
 
 # CLI debugging endpoints
@@ -1014,6 +1391,7 @@ async def claude_diagnose(
     traces = list(store.traces.values())
     spans = list(store.spans.values())
     events = store.events
+    stored_errors = store.errors  # NEW: Include stored DetailedErrors
 
     # Get Oracle state if available
     oracle_state = None
@@ -1032,13 +1410,14 @@ async def claude_diagnose(
     except Exception as e:
         logger.warning(f"Could not get Oracle state: {e}")
 
-    # Generate diagnostic bundle
+    # Generate diagnostic bundle - now with stored errors from Kafka
     bundle = await diagnostic_analyzer.analyze(
         traces=traces,
         spans=spans,
         events=events,
         oracle_state=oracle_state,
-        time_window_minutes=time_window_minutes
+        time_window_minutes=time_window_minutes,
+        stored_errors=stored_errors
     )
 
     if format == "prompt":
@@ -1067,7 +1446,11 @@ async def claude_diagnose(
 @app.get("/api/v1/claude/errors")
 async def claude_get_errors(
     limit: int = Query(default=10, le=50),
-    include_suggestions: bool = True
+    include_suggestions: bool = True,
+    include_raw_errors: bool = Query(
+        default=False,
+        description="Include raw DetailedError records from Kafka error store"
+    )
 ):
     """
     Get recent errors with Claude-friendly analysis.
@@ -1077,15 +1460,23 @@ async def claude_get_errors(
     - Affected agents
     - Sample messages
     - Contextual fix suggestions
+    - Stack traces (from stored DetailedErrors)
+    
+    When include_raw_errors=True, also returns the raw DetailedError
+    records from the agent-telemetry-errors Kafka topic.
     """
     if not diagnostic_analyzer:
         return {"error": "Diagnostic analyzer not initialized"}
 
-    traces = list(store.traces.values())
-    spans = list(store.spans.values())
-    events = store.events
-
-    errors = diagnostic_analyzer._analyze_errors(traces, spans, events)
+    # Use stored errors from Kafka if available, fall back to span/event analysis
+    stored_errors = store.errors
+    if stored_errors:
+        errors = diagnostic_analyzer._analyze_stored_errors(stored_errors)
+    else:
+        traces = list(store.traces.values())
+        spans = list(store.spans.values())
+        events = store.events
+        errors = diagnostic_analyzer._analyze_errors(traces, spans, events)
 
     result = []
     for error in errors[:limit]:
@@ -1096,10 +1487,17 @@ async def claude_get_errors(
             )
         result.append(error_dict)
 
-    return {
+    response = {
         "total_error_types": len(errors),
-        "errors": result
+        "errors": result,
+        "error_store_summary": store.get_error_summary(),
+        "source": "kafka_error_store" if stored_errors else "span_event_inference"
     }
+    
+    if include_raw_errors:
+        response["raw_errors"] = store.get_recent_errors(limit)
+    
+    return response
 
 
 @app.get("/api/v1/claude/slow-traces")
@@ -1194,12 +1592,14 @@ async def claude_get_suggested_actions(
     traces = list(store.traces.values())
     spans = list(store.spans.values())
     events = store.events
+    stored_errors = store.errors
 
     bundle = await diagnostic_analyzer.analyze(
         traces=traces,
         spans=spans,
         events=events,
-        time_window_minutes=15
+        time_window_minutes=15,
+        stored_errors=stored_errors
     )
 
     return {
@@ -1227,11 +1627,12 @@ async def claude_get_trace_context(trace_id: str):
     spans = store.get_spans_for_trace(trace_id)
     events = store.get_events_for_trace(trace_id)
     handoffs = store.get_handoffs_for_trace(trace_id)
+    trace_errors = store.get_errors_for_trace(trace_id)  # NEW: Get errors from store
 
     # Analyze the trace
     duration = trace.get("total_duration_ms", 0)
     is_slow = duration > 5000
-    has_errors = any(s.get("status") == "failed" for s in spans)
+    has_errors = any(s.get("status") == "failed" for s in spans) or len(trace_errors) > 0
 
     # Find bottleneck if slow
     bottleneck = None
@@ -1279,11 +1680,13 @@ async def claude_get_trace_context(trace_id: str):
             "agent_count": trace.get("agent_count", 0),
             "llm_calls": trace.get("llm_call_count", 0),
             "tool_calls": trace.get("tool_call_count", 0),
-            "total_tokens": trace.get("total_tokens", 0)
+            "total_tokens": trace.get("total_tokens", 0),
+            "error_count": len(trace_errors)  # NEW: Error count in summary
         },
         "bottleneck": bottleneck,
         "timeline": timeline,
         "handoffs": handoffs,
+        "errors": trace_errors,  # NEW: Full DetailedError records for this trace
         "user_input": trace.get("user_input"),
         "final_output": trace.get("final_output")
     }

@@ -33,6 +33,7 @@ from .state_schema import (
     QueueState, QueueTask, TaskPriority, PriorityLevel, TaskStatus,
     LiteLLMModel, PaymentType
 )
+from ..telemetry.schemas import AGENT_QUEUE_PREFIX, agent_queue_topic
 
 logger = logging.getLogger(__name__)
 
@@ -442,32 +443,89 @@ class TelemetryStoreCollector:
         ]
     
     async def get_queues(self) -> List[QueueState]:
-        """Get queue state (simulated from Kafka topics)"""
-        if not self.allow_mocks:
+        """
+        Get real queue state from the Telemetry API's agent queue store.
+        
+        Each agent has a dedicated Kafka queue (agent-queue-{name}).
+        This method queries the /api/v1/queues endpoint to get the
+        actual pending tasks in each agent's queue.
+        """
+        try:
+            import httpx
+            async with httpx.AsyncClient() as client:
+                response = await client.get(f"{self.api_url}/api/v1/queues")
+                data = response.json()
+                
+                queue_states = []
+                for q in data.get("queues", []):
+                    tasks = []
+                    for msg in q.get("pending", []):
+                        # Map priority from AgentMessage to QueueTask priority
+                        priority_map = {
+                            "low": PriorityLevel.LOW,
+                            "normal": PriorityLevel.NORMAL,
+                            "high": PriorityLevel.HIGH,
+                            "critical": PriorityLevel.CRITICAL
+                        }
+                        level = priority_map.get(
+                            msg.get("priority", "normal"),
+                            PriorityLevel.NORMAL
+                        )
+                        
+                        tasks.append(QueueTask(
+                            id=msg.get("message_id", ""),
+                            priority=TaskPriority(level=level),
+                            submitted_at=datetime.fromisoformat(
+                                msg["timestamp"]
+                            ) if "timestamp" in msg else datetime.utcnow(),
+                            invoked_by=msg.get("source_agent", ""),
+                            prompt=msg.get("reason", ""),
+                            args=msg.get("payload", {})
+                        ))
+                    
+                    queue_states.append(QueueState(
+                        name=q.get("queue_topic", f"{AGENT_QUEUE_PREFIX}{q.get('agent_name', '')}"),
+                        tasks=tasks,
+                        updated_at=datetime.utcnow()
+                    ))
+                
+                return queue_states
+                
+        except Exception as e:
+            logger.warning(f"Error fetching queue state from API: {e}")
+            if self.allow_mocks:
+                return self._get_mock_queues()
             return []
-        # In production, this would query Kafka consumer lag
+    
+    def _get_mock_queues(self) -> List[QueueState]:
+        """Return mock queue data for testing"""
         return [
             QueueState(
-                name="agent-telemetry-events",
+                name=agent_queue_topic("orchestrator"),
                 tasks=[],
                 updated_at=datetime.utcnow()
             ),
             QueueState(
-                name="agent-telemetry-spans",
-                tasks=[],
-                updated_at=datetime.utcnow()
-            ),
-            QueueState(
-                name="agent-task-queue",
+                name=agent_queue_topic("researcher"),
                 tasks=[
                     QueueTask(
                         id="queue-task-001",
                         priority=TaskPriority(level=PriorityLevel.NORMAL),
                         submitted_at=datetime.utcnow() - timedelta(seconds=10),
                         invoked_by="Orchestrator",
-                        prompt="Process user request"
+                        prompt="Research topic: AI agents"
                     )
                 ],
+                updated_at=datetime.utcnow()
+            ),
+            QueueState(
+                name=agent_queue_topic("writer"),
+                tasks=[],
+                updated_at=datetime.utcnow()
+            ),
+            QueueState(
+                name=agent_queue_topic("coder"),
+                tasks=[],
                 updated_at=datetime.utcnow()
             )
         ]

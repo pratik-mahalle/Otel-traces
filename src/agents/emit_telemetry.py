@@ -87,6 +87,20 @@ async def emit_loop():
 
             span.complete(output={"status": "ok", "iteration": iteration})
             await collector.record_span(span)
+            
+            # Record span metrics to the metrics topic
+            await collector.record_metrics(
+                trace_id=trace.trace_id,
+                agent_id=agent_id,
+                agent_name=agent_name,
+                metrics={
+                    "span_id": span.span_id,
+                    "span_kind": span.span_kind.value,
+                    "duration_ms": span.duration_ms,
+                    "status": span.status.value,
+                    "iteration": iteration
+                }
+            )
 
             if target_agent:
                 await collector.record_handoff(
