@@ -77,7 +77,12 @@ Each agent has its own Kafka topic. Agents talk to each other by writing to the 
 
 ### 2. Telemetry (Internal, Not in Kafka)
 
-No telemetry data goes to Kafka. When an agent fails, errors are stored internally by the Telemetry API. The API also observes agent queue traffic (read-only) to track which tasks are pending. Claude Code queries the REST API to see errors and queue state.
+No telemetry data goes to Kafka. When an agent fails, errors are stored internally by the Telemetry API and persisted to disk in two JSONL files:
+
+- **`state_time_machine.jsonl`** — Full state snapshots (written periodically)
+- **`diff_time_machine.jsonl`** — Incremental changes (every error, queue message, etc.)
+
+The API also observes agent queue traffic (read-only) to track which tasks are pending. Claude Code queries the REST API to see errors and queue state.
 
 ### 3. Claude Code Debugging
 
@@ -175,6 +180,19 @@ k8s/
 
 ---
 
+## Telemetry Storage
+
+Telemetry is persisted to two JSONL files in `./telemetry_data/`:
+
+| File | Contents | When Written |
+|------|----------|--------------|
+| `state_time_machine.jsonl` | Full state snapshots (errors, queue messages, counts) | Every 10 errors or 50 queue messages |
+| `diff_time_machine.jsonl` | Incremental changes (each error, message, trace, span) | Every add/update/delete |
+
+These files enable time-travel debugging and provide a complete audit trail.
+
+---
+
 ## Environment Variables
 
 | Variable | Default | Description |
@@ -188,21 +206,6 @@ k8s/
 
 ---
 
-## Share with recruiter (draft message)
 
-Hi,
-
-I've implemented the multi-agent telemetry system we discussed and would like to share the repo.
-
-**GitHub:** https://github.com/pratik-mahalle/Otel-traces
-
-The system follows your feedback: Kafka is used only for inter-agent communication (per-agent queues; Agent1 writes to Agent2's queue, Agent2 reads from its own). The telemetry layer doesn't put any data into Kafka — it just observes the queues and stores errors internally so Claude Code can debug via REST API.
-
-The README has a short description, architecture diagram, and quick start. Happy to walk through it or answer any questions.
-
-Thanks,  
-Pratik
-
----
 
 Made with care by Pratik Mahalle

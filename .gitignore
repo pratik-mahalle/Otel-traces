@@ -50,3 +50,7 @@ htmlcov/
 # OS
 .DS_Store
 Thumbs.db
+
+# Telemetry data (time-machine persistence)
+telemetry_data/
+*.jsonl

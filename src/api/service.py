@@ -8,6 +8,7 @@ import json
 import logging
 import os
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
 from contextlib import asynccontextmanager
 
@@ -90,9 +91,9 @@ class DebugSubscription(BaseModel):
     event_types: List[str] = []
 
 
-# In-memory storage for demo (use proper DB in production)
+# Persistent storage with time-machine JSONL files
 class TelemetryStore:
-    def __init__(self):
+    def __init__(self, data_dir: str = "./telemetry_data"):
         self.traces: Dict[str, Dict] = {}
         self.spans: Dict[str, Dict] = {}
         self.events: List[Dict] = []
@@ -100,42 +101,92 @@ class TelemetryStore:
         self.errors: List[Dict] = []       # Dedicated error storage
         self.metrics: List[Dict] = []      # Dedicated metrics storage
         self.agent_messages: List[Dict] = []  # Inter-agent queue messages (observed)
+        
+        # Time-machine persistence
+        self.data_dir = Path(data_dir)
+        self.data_dir.mkdir(parents=True, exist_ok=True)
+        self.state_file = self.data_dir / "state_time_machine.jsonl"
+        self.diff_file = self.data_dir / "diff_time_machine.jsonl"
+        
+        # Track previous state for diffs
+        self._prev_state = self._get_current_state()
+    
+    def _get_current_state(self) -> Dict:
+        """Get current full state snapshot"""
+        return {
+            "timestamp": datetime.utcnow().isoformat(),
+            "traces_count": len(self.traces),
+            "spans_count": len(self.spans),
+            "events_count": len(self.events),
+            "handoffs_count": len(self.handoffs),
+            "errors_count": len(self.errors),
+            "metrics_count": len(self.metrics),
+            "agent_messages_count": len(self.agent_messages),
+            "errors": self.errors[-100:],  # Last 100 errors
+            "agent_messages": self.agent_messages[-100:]  # Last 100 messages
+        }
+    
+    def _write_state_snapshot(self):
+        """Write full state snapshot to state_time_machine.jsonl"""
+        state = self._get_current_state()
+        with open(self.state_file, "a") as f:
+            f.write(json.dumps(state) + "\n")
+    
+    def _write_diff(self, change_type: str, entity_type: str, data: Dict):
+        """Write incremental diff to diff_time_machine.jsonl"""
+        diff = {
+            "timestamp": datetime.utcnow().isoformat(),
+            "change_type": change_type,  # "added", "updated", "deleted"
+            "entity_type": entity_type,  # "error", "agent_message", "trace", etc.
+            "data": data
+        }
+        with open(self.diff_file, "a") as f:
+            f.write(json.dumps(diff) + "\n")
     
     def add_trace(self, trace: Dict):
         self.traces[trace["trace_id"]] = trace
+        self._write_diff("added", "trace", trace)
     
     def add_span(self, span: Dict):
         self.spans[span["span_id"]] = span
+        self._write_diff("added", "span", span)
     
     def add_event(self, event: Dict):
         self.events.append(event)
-        # Keep only last 10000 events
         if len(self.events) > 10000:
             self.events = self.events[-10000:]
+        self._write_diff("added", "event", event)
     
     def add_handoff(self, handoff: Dict):
         self.handoffs.append(handoff)
+        self._write_diff("added", "handoff", handoff)
     
     def add_error(self, error: Dict):
-        """Store a DetailedError in the internal error store"""
+        """Store a DetailedError in the internal error store + persist to disk"""
         self.errors.append(error)
-        # Keep only last 5000 errors
         if len(self.errors) > 5000:
             self.errors = self.errors[-5000:]
+        self._write_diff("added", "error", error)
+        # Write state snapshot every 10 errors
+        if len(self.errors) % 10 == 0:
+            self._write_state_snapshot()
     
     def add_metric(self, metric: Dict):
-        """Store a metric from the agent-telemetry-metrics topic"""
+        """Store a metric"""
         self.metrics.append(metric)
-        # Keep only last 10000 metrics
         if len(self.metrics) > 10000:
             self.metrics = self.metrics[-10000:]
+        self._write_diff("added", "metric", metric)
     
     def add_agent_message(self, message: Dict):
-        """Store an observed inter-agent queue message"""
+        """Store an observed inter-agent queue message + persist to disk"""
         self.agent_messages.append(message)
-        # Keep only last 10000 agent messages
         if len(self.agent_messages) > 10000:
             self.agent_messages = self.agent_messages[-10000:]
+        self._write_diff("added", "agent_message", message)
+        # Write state snapshot every 50 messages
+        if len(self.agent_messages) % 50 == 0:
+            self._write_state_snapshot()
     
     def get_agent_queue_messages(self, agent_name: str) -> List[Dict]:
         """Get all messages targeted at a specific agent's queue"""
