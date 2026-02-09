@@ -13,7 +13,7 @@ Orchestrator writes task  -->  agent-queue-researcher  -->  Researcher reads
 Researcher writes result  -->  agent-queue-orchestrator -->  Orchestrator reads
 ```
 
-The telemetry service observes queue traffic (read-only) and captures **only errors** to a dedicated error store for Claude Code debugging.
+The Telemetry API observes queue traffic (read-only) and stores errors internally so Claude Code can debug issues.
 
 ```
                     ┌──────────────────────────────────────────────┐
@@ -33,7 +33,6 @@ The telemetry service observes queue traffic (read-only) and captures **only err
                     │   │  agent-queue-coder                      │  │
                     │   │  agent-queue-reviewer                   │  │
                     │   │                                        │  │
-                    │   │  + agent-telemetry-errors (error logs) │  │
                     │   └──────────────────┬────────────────────┘  │
                     │                      │                        │
                     │                      ▼                        │
@@ -76,11 +75,9 @@ Each agent has its own Kafka topic. Agents talk to each other by writing to the 
 5. Orchestrator reads the result from its own queue
 ```
 
-### 2. Error Capture (Only Errors Sent to Kafka)
+### 2. Telemetry (Internal, Not in Kafka)
 
-Only **errors** are sent to Kafka as telemetry. When an agent fails (LLM error, tool error, timeout, etc.), a `DetailedError` is published to `agent-telemetry-errors`. The Telemetry API consumes this topic and stores errors in a dedicated Error Store.
-
-The Telemetry API also observes agent queue traffic (read-only) to track which tasks are pending.
+No telemetry data goes to Kafka. When an agent fails, errors are stored internally by the Telemetry API. The API also observes agent queue traffic (read-only) to track which tasks are pending. Claude Code queries the REST API to see errors and queue state.
 
 ### 3. Claude Code Debugging
 
@@ -159,7 +156,7 @@ src/
     emit_telemetry.py        # Sample telemetry agent
   telemetry/
     schemas.py               # AgentMessage, DetailedError, spans, traces
-    collector.py             # Kafka producer (send_to_agent, record_error)
+    collector.py             # Kafka producer (send_to_agent) + internal error store
     claude_integration.py    # Claude Code diagnostic analyzer
     litellm_integration.py   # LiteLLM Gateway integration
     otlp_exporter.py         # OpenTelemetry export
@@ -186,6 +183,25 @@ k8s/
 | `ORACLE_DISCOVERY_MODE` | `auto` | Agent discovery: `auto`, `labeled`, `all`, `telemetry` |
 | `ORACLE_STRICT_SCHEMA` | `true` | Strict JSON schema output |
 | `OLLAMA_BASE_URL` | `http://ollama:11434` | Ollama API URL |
+
+---
+
+---
+
+## Share with recruiter (draft message)
+
+Hi,
+
+I've implemented the multi-agent telemetry system we discussed and would like to share the repo.
+
+**GitHub:** https://github.com/pratik-mahalle/Otel-traces
+
+The system follows your feedback: Kafka is used only for inter-agent communication (per-agent queues; Agent1 writes to Agent2's queue, Agent2 reads from its own). The telemetry layer doesn't put any data into Kafka — it just observes the queues and stores errors internally so Claude Code can debug via REST API.
+
+The README has a short description, architecture diagram, and quick start. Happy to walk through it or answer any questions.
+
+Thanks,  
+Pratik
 
 ---
 

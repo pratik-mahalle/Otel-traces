@@ -9,7 +9,7 @@ from .schemas import (
     TokenUsage, LLMMessage, ToolDefinition, ToolInvocation,
     DetailedError, AgentStatus, SpanKind, ErrorSeverity, ErrorCategory,
     AgentMessage, MessageType, MessagePriority,
-    KAFKA_TOPICS, AGENT_QUEUE_PREFIX, DEFAULT_AGENT_NAMES,
+    AGENT_QUEUE_PREFIX, DEFAULT_AGENT_NAMES,
     agent_queue_topic
 )
 
@@ -64,7 +64,7 @@ __all__ = [
     "TokenUsage", "LLMMessage", "ToolDefinition", "ToolInvocation",
     "DetailedError", "AgentStatus", "SpanKind", "ErrorSeverity", "ErrorCategory",
     "AgentMessage", "MessageType", "MessagePriority",
-    "KAFKA_TOPICS", "AGENT_QUEUE_PREFIX", "DEFAULT_AGENT_NAMES",
+    "AGENT_QUEUE_PREFIX", "DEFAULT_AGENT_NAMES",
     "agent_queue_topic",
 
     # Collector

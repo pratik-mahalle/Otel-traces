@@ -396,7 +396,7 @@ class ClaudeDiagnosticAnalyzer:
         Analyze telemetry data and generate a diagnostic bundle.
         
         Args:
-            stored_errors: DetailedError records from the agent-telemetry-errors
+            stored_errors: DetailedError records from the internal error store
                           Kafka topic. When provided, these are used for richer
                           error analysis with stack traces, classifications,
                           and suggested fixes.
@@ -598,7 +598,7 @@ class ClaudeDiagnosticAnalyzer:
         stored_errors: List[Dict[str, Any]]
     ) -> List[ErrorSummary]:
         """
-        Analyze errors from the dedicated agent-telemetry-errors Kafka topic.
+        Analyze errors from the internal error store.
         These are rich DetailedError objects with classification, stack traces,
         and suggested fixes already attached.
         """

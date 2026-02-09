@@ -178,14 +178,9 @@ create_kafka_topics() {
     KAFKA_POD=$(kubectl -n telemetry get pods -l app=kafka -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo "")
     
     if [ -n "$KAFKA_POD" ]; then
-        # Inter-agent communication queues (one per agent)
-        AGENT_QUEUE_TOPICS=("agent-queue-orchestrator" "agent-queue-researcher" "agent-queue-writer" "agent-queue-coder" "agent-queue-reviewer")
-        
-        # Error logs topic (only telemetry data sent to Kafka)
-        ERROR_TOPIC=("agent-telemetry-errors")
-        
-        # Combine: agent queues + errors
-        TOPICS=("${AGENT_QUEUE_TOPICS[@]}" "${ERROR_TOPIC[@]}")
+        # Kafka is ONLY for inter-agent communication queues (one per agent)
+        # No telemetry topics — errors are stored internally by the API
+        TOPICS=("agent-queue-orchestrator" "agent-queue-researcher" "agent-queue-writer" "agent-queue-coder" "agent-queue-reviewer")
         
         for topic in "${TOPICS[@]}"; do
             kubectl -n telemetry exec "$KAFKA_POD" -- sh -c "\

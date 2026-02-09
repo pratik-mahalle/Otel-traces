@@ -117,7 +117,7 @@ class TelemetryStore:
         self.handoffs.append(handoff)
     
     def add_error(self, error: Dict):
-        """Store a DetailedError from the agent-telemetry-errors topic"""
+        """Store a DetailedError in the internal error store"""
         self.errors.append(error)
         # Keep only last 5000 errors
         if len(self.errors) > 5000:
@@ -347,17 +347,12 @@ async def lifespan(app: FastAPI):
     )
     logger.info("Claude diagnostic analyzer initialized")
 
-    # Start Kafka consumer for errors + agent queue observation
+    # Start Kafka consumer — observe inter-agent queues only
+    # No telemetry data goes to Kafka; errors are stored internally via REST API
     kafka_servers = os.environ.get("KAFKA_BOOTSTRAP_SERVERS", "kafka:9092")
     
-    # Only errors topic for telemetry (spans/traces/events/metrics NOT sent to Kafka)
-    error_topic = ["agent-telemetry-errors"]
-    
     # Agent queue topics (inter-agent communication — observed read-only)
-    agent_queue_topics = [agent_queue_topic(name) for name in DEFAULT_AGENT_NAMES]
-    
-    # Combined: errors + agent queues
-    topics = error_topic + agent_queue_topics
+    topics = [agent_queue_topic(name) for name in DEFAULT_AGENT_NAMES]
 
     consumer_task = None
 
@@ -376,7 +371,7 @@ async def lifespan(app: FastAPI):
                 topic = message.topic
                 value = message.value
                 
-                # ---- Inter-agent queue messages (observed for monitoring) ----
+                # All Kafka topics are agent queues — observe for monitoring
                 if topic.startswith(AGENT_QUEUE_PREFIX):
                     store.add_agent_message(value)
                     await manager.broadcast({
@@ -385,19 +380,6 @@ async def lifespan(app: FastAPI):
                         "message_type": value.get("message_type", "unknown"),
                         "source_agent": value.get("source_agent", ""),
                         "target_agent": value.get("target_agent", ""),
-                        **value
-                    })
-                
-                # ---- Error logs (only telemetry data sent to Kafka) ----
-                elif "errors" in topic:
-                    store.add_error(value)
-                    await manager.broadcast({
-                        "type": "error",
-                        "severity": value.get("severity", "error"),
-                        "category": value.get("category", "unknown"),
-                        "message": f"[{value.get('severity', 'error').upper()}] "
-                                   f"{value.get('error_type', 'Error')}: "
-                                   f"{value.get('error_message', 'Unknown error')}",
                         **value
                     })
         
@@ -706,8 +688,8 @@ async def list_errors(
     """
     List stored error logs with filtering.
     
-    These errors come from the dedicated agent-telemetry-errors Kafka topic
-    and contain rich DetailedError data including:
+    These errors are stored internally (not in Kafka) and contain rich
+    DetailedError data including:
     - Stack traces
     - Error classification (severity + category)
     - Agent context (which agent, what operation)
@@ -1429,7 +1411,7 @@ async def claude_get_errors(
     - Stack traces (from stored DetailedErrors)
     
     When include_raw_errors=True, also returns the raw DetailedError
-    records from the agent-telemetry-errors Kafka topic.
+    records from the internal error store.
     """
     if not diagnostic_analyzer:
         return {"error": "Diagnostic analyzer not initialized"}

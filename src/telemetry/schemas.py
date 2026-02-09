@@ -788,8 +788,5 @@ class KafkaMessage:
         }
 
 
-# Telemetry topic — only errors are sent to Kafka.
-# Inter-agent communication uses agent-queue-{name} topics (see AGENT_QUEUE_PREFIX).
-KAFKA_TOPICS = {
-    "errors": "agent-telemetry-errors"
-}
+# No telemetry topics in Kafka. Kafka is ONLY for inter-agent queues.
+# Telemetry data (errors, traces, etc.) is stored internally by the Telemetry API.

@@ -1,6 +1,6 @@
 """
 Telemetry Collector - Kafka Integration
-Only ERRORS are sent to Kafka for telemetry. Inter-agent messages go through agent queues.
+Kafka is ONLY for inter-agent queues. Telemetry (errors, traces, etc.) is stored internally.
 """
 
 import asyncio
@@ -15,7 +15,7 @@ from aiokafka.errors import KafkaError
 
 from .schemas import (
     AgentSpan, AgentTrace, AgentHandoff, DebugEvent, DetailedError,
-    KafkaMessage, KAFKA_TOPICS, AgentStatus, SpanKind,
+    KafkaMessage, AgentStatus, SpanKind,
     ErrorSeverity, ErrorCategory,
     AgentMessage, MessageType, MessagePriority,
     agent_queue_topic, AGENT_QUEUE_PREFIX
@@ -27,9 +27,8 @@ logger = logging.getLogger(__name__)
 class TelemetryCollector:
     """
     Main telemetry collector for multi-agent systems.
-    Only errors are sent to Kafka (agent-telemetry-errors topic).
-    Inter-agent communication uses per-agent Kafka queues.
-    Spans, traces, handoffs are tracked internally but NOT sent to Kafka.
+    Kafka is used ONLY for inter-agent queues (agent-queue-{name}).
+    All telemetry (errors, traces, spans) is stored internally — not in Kafka.
     """
     
     def __init__(
@@ -225,7 +224,7 @@ class TelemetryCollector:
         if span.trace_id in self._active_traces:
             self._active_traces[span.trace_id].add_span(span)
     
-    # Error Recording
+    # Error Recording (stored internally, NOT sent to Kafka)
     
     async def record_error(
         self,
@@ -233,15 +232,20 @@ class TelemetryCollector:
         immediate: bool = True
     ):
         """
-        Record a DetailedError to the dedicated Kafka errors topic.
-        This is the ONLY telemetry data sent to Kafka.
+        Record a DetailedError internally.
+        Errors are NOT sent to Kafka — they are stored in the Telemetry API's
+        internal error store and queryable via REST API.
         """
-        await self._send(
-            KAFKA_TOPICS["errors"],
-            error.error_id,
-            error.to_dict(),
-            immediate=immediate
-        )
+        # Notify local error handlers
+        if "error_recorded" in self._event_handlers:
+            for handler in self._event_handlers["error_recorded"]:
+                try:
+                    if asyncio.iscoroutinefunction(handler):
+                        await handler(error)
+                    else:
+                        handler(error)
+                except Exception as e:
+                    logger.error(f"Error handler callback failed: {e}")
         
         logger.info(
             f"Recorded error {error.error_id}: [{error.severity.value}] "
@@ -259,7 +263,7 @@ class TelemetryCollector:
         **kwargs
     ) -> DetailedError:
         """
-        Create a DetailedError from an exception and send it to Kafka.
+        Create a DetailedError from an exception and store it internally.
         Convenience method that auto-classifies the error.
         Returns the DetailedError for further use.
         """
@@ -450,15 +454,14 @@ class InMemoryTelemetryCollector(TelemetryCollector):
     In-memory telemetry collector for testing and local development
     without Kafka dependency.
     
-    Stores both telemetry messages AND inter-agent queue messages in memory.
+    Stores inter-agent queue messages and errors in memory.
     """
     
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        self._messages: Dict[str, List[Dict[str, Any]]] = {
-            topic: [] for topic in KAFKA_TOPICS.values()
-        }
-        # Separate store for inter-agent queue messages (keyed by topic)
+        # Internal error store (no Kafka)
+        self._errors: List[Dict[str, Any]] = []
+        # Inter-agent queue messages (keyed by topic)
         self._agent_queues: Dict[str, List[Dict[str, Any]]] = {}
         # Callbacks registered per agent for in-memory queue consumption
         self._queue_callbacks: Dict[str, Callable] = {}
@@ -472,10 +475,8 @@ class InMemoryTelemetryCollector(TelemetryCollector):
         logger.info("In-memory telemetry collector stopped")
     
     async def _send(self, topic: str, key: str, value: Dict[str, Any], immediate: bool = False):
-        """Store message in memory"""
-        # Route to the correct store based on topic prefix
+        """Store inter-agent queue messages in memory (only agent-queue-* topics use Kafka)"""
         if topic.startswith(AGENT_QUEUE_PREFIX):
-            # Inter-agent queue message
             if topic not in self._agent_queues:
                 self._agent_queues[topic] = []
             self._agent_queues[topic].append({
@@ -496,27 +497,6 @@ class InMemoryTelemetryCollector(TelemetryCollector):
                             callback(msg)
                     except Exception as e:
                         logger.error(f"In-memory queue callback error: {e}")
-        else:
-            # Telemetry topic message
-            if topic not in self._messages:
-                self._messages[topic] = []
-            self._messages[topic].append({
-                "key": key,
-                "value": value,
-                "timestamp": datetime.utcnow().isoformat()
-            })
-        
-        # Notify local event handlers for error events
-        if topic == KAFKA_TOPICS["errors"]:
-            if "error_recorded" in self._event_handlers:
-                for handler in self._event_handlers["error_recorded"]:
-                    try:
-                        if asyncio.iscoroutinefunction(handler):
-                            await handler(value)
-                        else:
-                            handler(value)
-                    except Exception as e:
-                        logger.error(f"Event handler error: {e}")
     
     async def consume_agent_queue(
         self,
@@ -528,9 +508,11 @@ class InMemoryTelemetryCollector(TelemetryCollector):
         self._queue_callbacks[agent_name] = callback
         logger.info(f"In-memory queue consumer registered for agent '{agent_name}'")
     
-    def get_messages(self, topic: str) -> List[Dict[str, Any]]:
-        """Get all messages for a telemetry topic"""
-        return self._messages.get(topic, [])
+    async def record_error(self, error: DetailedError, immediate: bool = True):
+        """Store error in memory"""
+        self._errors.append(error.to_dict())
+        # Also call parent to trigger local handlers
+        await super().record_error(error, immediate)
     
     def get_agent_queue_messages(self, agent_name: str) -> List[Dict[str, Any]]:
         """Get all messages in an agent's queue"""
@@ -543,30 +525,21 @@ class InMemoryTelemetryCollector(TelemetryCollector):
     
     def get_errors(self, trace_id: Optional[str] = None) -> List[Dict[str, Any]]:
         """Get all errors, optionally filtered by trace_id"""
-        errors = [msg["value"] for msg in self._messages[KAFKA_TOPICS["errors"]]]
+        errors = list(self._errors)
         if trace_id:
             errors = [e for e in errors if e.get("trace_id") == trace_id]
         return errors
     
     def get_errors_by_severity(self, severity: str) -> List[Dict[str, Any]]:
         """Get errors filtered by severity level"""
-        return [
-            msg["value"]
-            for msg in self._messages[KAFKA_TOPICS["errors"]]
-            if msg["value"].get("severity") == severity
-        ]
+        return [e for e in self._errors if e.get("severity") == severity]
     
     def get_errors_by_category(self, category: str) -> List[Dict[str, Any]]:
         """Get errors filtered by category"""
-        return [
-            msg["value"]
-            for msg in self._messages[KAFKA_TOPICS["errors"]]
-            if msg["value"].get("category") == category
-        ]
+        return [e for e in self._errors if e.get("category") == category]
     
     def clear(self):
-        """Clear all messages (telemetry + agent queues)"""
-        for topic in self._messages:
-            self._messages[topic].clear()
+        """Clear all in-memory data (errors + agent queues)"""
+        self._errors.clear()
         for topic in self._agent_queues:
             self._agent_queues[topic].clear()
