@@ -93,7 +93,7 @@ class DebugSubscription(BaseModel):
 
 # Persistent storage with time-machine JSONL files
 class TelemetryStore:
-    def __init__(self, data_dir: str = "./telemetry_data"):
+    def __init__(self, data_dir: str = None):
         self.traces: Dict[str, Dict] = {}
         self.spans: Dict[str, Dict] = {}
         self.events: List[Dict] = []
@@ -103,7 +103,8 @@ class TelemetryStore:
         self.agent_messages: List[Dict] = []  # Inter-agent queue messages (observed)
         
         # Time-machine persistence
-        self.data_dir = Path(data_dir)
+        base_dir = data_dir or os.environ.get("TELEMETRY_DATA_DIR", "./telemetry_data")
+        self.data_dir = Path(base_dir)
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.state_file = self.data_dir / "state_time_machine.jsonl"
         self.diff_file = self.data_dir / "diff_time_machine.jsonl"
