@@ -13,40 +13,38 @@ Orchestrator writes task  -->  agent-queue-researcher  -->  Researcher reads
 Researcher writes result  -->  agent-queue-orchestrator -->  Orchestrator reads
 ```
 
-The Telemetry API observes queue traffic (read-only) and stores errors internally so Claude Code can debug issues.
+Agents and the Telemetry API both write to shared JSONL files. Claude Code reads them via an MCP server.
 
 ```
                     ┌──────────────────────────────────────────────┐
-                    │                 EKS CLUSTER                   │
+                    │                 K8s CLUSTER                   │
                     │                                               │
                     │   Orchestrator    Researcher    Writer  Coder │
                     │       │               │          │       │   │
+                    │       │  inter-agent  │          │       │   │
                     │       └───────────────┴──────────┴───────┘   │
-                    │                       │                       │
-                    │                       ▼                       │
-                    │   ┌───────────────────────────────────────┐  │
-                    │   │     KAFKA - Per-Agent Queues           │  │
-                    │   │                                        │  │
-                    │   │  agent-queue-orchestrator               │  │
-                    │   │  agent-queue-researcher                 │  │
-                    │   │  agent-queue-writer                     │  │
-                    │   │  agent-queue-coder                      │  │
-                    │   │  agent-queue-reviewer                   │  │
-                    │   │                                        │  │
-                    │   └──────────────────┬────────────────────┘  │
-                    │                      │                        │
-                    │                      ▼                        │
-                    │   ┌───────────────────────────────────────┐  │
-                    │   │     Telemetry API (Observer)           │  │
-                    │   │                                        │  │
-                    │   │  Queue Messages  │  Error Store        │  │
-                    │   └──────────────────┬────────────────────┘  │
-                    │                      │                        │
-                    └──────────────────────┼────────────────────────┘
+                    │               │                  │            │
+                    │          (Kafka queues)    (direct write)     │
+                    │               │                  │            │
+                    │               ▼                  ▼            │
+                    │   ┌─────────────────┐  ┌────────────────┐   │
+                    │   │  KAFKA           │  │ Shared Volume  │   │
+                    │   │  agent-queue-*   │  │                │   │
+                    │   └────────┬────────┘  │ state_*.jsonl  │   │
+                    │            │            │ diff_*.jsonl   │   │
+                    │            ▼            └───────┬────────┘   │
+                    │   ┌─────────────────┐          │            │
+                    │   │ Telemetry API   │──────────┘            │
+                    │   │ (queue observer)│  writes to JSONL too  │
+                    │   └─────────────────┘                       │
+                    └─────────────────────────────────────────────┘
+                                           │
+                              MCP Server reads JSONL files
                                            │
                                            ▼
                                       Claude Code
-                             (queries REST API to debug)
+                              (MCP tools: diagnose, errors,
+                               replay, queue status, etc.)
 ```
 
 ---
@@ -84,22 +82,25 @@ No telemetry data goes to Kafka. When an agent fails, errors are stored internal
 
 The API also observes agent queue traffic (read-only) to track which tasks are pending. Claude Code queries the REST API to see errors and queue state.
 
-### 3. Claude Code Debugging
+### 3. Claude Code Debugging (MCP Server)
 
-Claude Code queries the REST API to find and fix issues:
+Claude Code connects to the MCP server which reads the JSONL files directly. The MCP server exposes 6 tools:
+
+| MCP Tool | What it does |
+|----------|-------------|
+| `get_latest_state` | Latest state snapshot (error counts, active traces, etc.) |
+| `query_diffs` | Search diffs by entity type, time range, change type |
+| `get_errors` | Search errors by severity, category, agent name |
+| `replay_timeline` | Chronological replay of all events in a time window |
+| `get_queue_status` | Per-agent queue stats (sent/received/pending) |
+| `diagnose` | Full diagnostic: errors + queue bottlenecks + suggested fixes |
+
+The REST API is also available for direct queries:
 
 ```bash
-# Check agent queue states
 curl http://localhost:8080/api/v1/queues
-
-# Check errors
 curl http://localhost:8080/api/v1/errors?severity=critical
-
-# Full diagnostics
 curl http://localhost:8080/api/v1/claude/diagnose
-
-# Verify fix
-curl http://localhost:8080/api/v1/oracle/validate
 ```
 
 ---
@@ -161,21 +162,26 @@ src/
     emit_telemetry.py        # Sample telemetry agent
   telemetry/
     schemas.py               # AgentMessage, DetailedError, spans, traces
-    collector.py             # Kafka producer (send_to_agent) + internal error store
+    collector.py             # Kafka producer + JSONL file writer
     claude_integration.py    # Claude Code diagnostic analyzer
     litellm_integration.py   # LiteLLM Gateway integration
     otlp_exporter.py         # OpenTelemetry export
     sampling.py              # Sampling & rate limiting
+  mcp/
+    server.py                # MCP server (6 tools for Claude Code)
   api/
     service.py               # FastAPI service (queue observer, error store)
   oracle/
     state_schema.py          # Strict JSON schema for system state
     state_aggregator.py      # Aggregates state from queues, K8s, LiteLLM
+telemetry_data/              # JSONL time-machine files (gitignored)
 scripts/
   setup.sh                   # Cluster + Kafka topics setup
 k8s/
-  deployment.yaml            # Kafka, Ollama, API deployments
-  agents-sample.yaml         # Sample agent pods
+  deployment.yaml            # Kafka, Ollama, API, shared PVC
+  agents-sample.yaml         # Sample agent pods (with shared volume)
+.cursor/
+  mcp.json                   # MCP server config for Cursor
 ```
 
 ---
@@ -198,14 +204,11 @@ These files enable time-travel debugging and provide a complete audit trail.
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `KAFKA_BOOTSTRAP_SERVERS` | `kafka:9092` | Kafka connection |
+| `TELEMETRY_DATA_DIR` | `./telemetry_data` | Directory for JSONL time-machine files |
 | `ORACLE_DISCOVERY_MODE` | `auto` | Agent discovery: `auto`, `labeled`, `all`, `telemetry` |
 | `ORACLE_STRICT_SCHEMA` | `true` | Strict JSON schema output |
 | `OLLAMA_BASE_URL` | `http://ollama:11434` | Ollama API URL |
 
 ---
-
----
-
-
 
 Made with care by Pratik Mahalle

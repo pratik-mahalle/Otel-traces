@@ -166,6 +166,19 @@ spec:
         - name: ollama-data
           emptyDir: {}
 ---
+# Shared PersistentVolumeClaim for JSONL time-machine files
+# Mounted by both agent pods and the Telemetry API pod
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: telemetry-data
+  namespace: telemetry
+spec:
+  accessModes: ["ReadWriteMany"]
+  resources:
+    requests:
+      storage: 1Gi
+---
 # Telemetry API Service
 apiVersion: v1
 kind: Service
@@ -214,6 +227,11 @@ spec:
               value: "false"
             - name: ORACLE_STRICT_SCHEMA
               value: "true"
+            - name: TELEMETRY_DATA_DIR
+              value: "/data/telemetry"
+          volumeMounts:
+            - name: telemetry-data
+              mountPath: /data/telemetry
           resources:
             requests:
               memory: "256Mi"
@@ -221,6 +239,10 @@ spec:
             limits:
               memory: "512Mi"
               cpu: "500m"
+      volumes:
+        - name: telemetry-data
+          persistentVolumeClaim:
+            claimName: telemetry-data
 ---
 # Dashboard Service
 apiVersion: v1

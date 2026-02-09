@@ -45,6 +45,15 @@ spec:
               value: "20"
             - name: AGENT_INTERVAL_SECONDS
               value: "10"
+            - name: TELEMETRY_DATA_DIR
+              value: "/data/telemetry"
+          volumeMounts:
+            - name: telemetry-data
+              mountPath: /data/telemetry
+      volumes:
+        - name: telemetry-data
+          persistentVolumeClaim:
+            claimName: telemetry-data
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -93,3 +102,12 @@ spec:
               value: "20"
             - name: AGENT_INTERVAL_SECONDS
               value: "10"
+            - name: TELEMETRY_DATA_DIR
+              value: "/data/telemetry"
+          volumeMounts:
+            - name: telemetry-data
+              mountPath: /data/telemetry
+      volumes:
+        - name: telemetry-data
+          persistentVolumeClaim:
+            claimName: telemetry-data

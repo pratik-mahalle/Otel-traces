@@ -27,3 +27,6 @@ jsonschema>=4.21.1
 
 # Kubernetes (for Oracle Monitor)
 kubernetes>=28.1.0
+
+# MCP Server (for Claude Code integration)
+fastmcp>=2.0.0

@@ -34,13 +34,15 @@ async def emit_loop():
     target_agent = os.getenv("TARGET_AGENT_NAME")
     kafka_servers = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "kafka:9092")
     environment = os.getenv("ENVIRONMENT", "development")
+    jsonl_dir = os.getenv("TELEMETRY_DATA_DIR", "./telemetry_data")
     work_seconds = _env_int("AGENT_WORK_SECONDS", 20)
     interval_seconds = _env_int("AGENT_INTERVAL_SECONDS", 10)
 
     collector = TelemetryCollector(
         kafka_bootstrap_servers=kafka_servers,
         service_name=f"agent-{agent_id}",
-        environment=environment
+        environment=environment,
+        jsonl_dir=jsonl_dir
     )
     await collector.start()
 

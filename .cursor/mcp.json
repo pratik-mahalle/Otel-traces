@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "telemetry-time-machine": {
+      "command": "python3",
+      "args": ["-m", "src.mcp.server"],
+      "env": {
+        "TELEMETRY_DATA_DIR": "./telemetry_data"
+      }
+    }
+  }
+}
