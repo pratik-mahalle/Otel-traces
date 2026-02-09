@@ -40,7 +40,9 @@ from ..telemetry.schemas import (
     AgentMessage
 )
 
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
 
 def _env_bool(name: str, default: bool) -> bool:
     value = os.getenv(name)
@@ -406,19 +408,41 @@ async def lifespan(app: FastAPI):
     # Agent queue topics (inter-agent communication — observed read-only)
     topics = [agent_queue_topic(name) for name in DEFAULT_AGENT_NAMES]
 
+    consumer = None
     consumer_task = None
 
-    try:
-        consumer = AIOKafkaConsumer(
-            *topics,
-            bootstrap_servers=kafka_servers,
-            group_id="telemetry-api-consumer",
-            value_deserializer=lambda v: json.loads(v.decode('utf-8')),
-            auto_offset_reset='earliest'
-        )
-        await consumer.start()
-        
-        async def consume_messages():
+    async def kafka_consumer_loop():
+        """Connect to Kafka with retries, then consume forever."""
+        nonlocal consumer
+        max_retries = 30
+        for attempt in range(1, max_retries + 1):
+            try:
+                consumer = AIOKafkaConsumer(
+                    *topics,
+                    bootstrap_servers=kafka_servers,
+                    group_id="telemetry-api-consumer",
+                    value_deserializer=lambda v: json.loads(v.decode('utf-8')),
+                    auto_offset_reset='earliest'
+                )
+                await consumer.start()
+                logger.info(
+                    f"Kafka consumer connected (attempt {attempt}), "
+                    f"subscribed to {len(topics)} topics: {topics}"
+                )
+                break
+            except Exception as e:
+                wait = min(attempt * 2, 30)  # backoff: 2s, 4s, 6s, ... max 30s
+                logger.warning(
+                    f"Kafka not ready (attempt {attempt}/{max_retries}): {e}. "
+                    f"Retrying in {wait}s..."
+                )
+                await asyncio.sleep(wait)
+        else:
+            logger.error("Kafka consumer failed to connect after all retries. Running standalone.")
+            return
+
+        # Consume messages forever
+        try:
             async for message in consumer:
                 topic = message.topic
                 value = message.value
@@ -434,12 +458,13 @@ async def lifespan(app: FastAPI):
                         "target_agent": value.get("target_agent", ""),
                         **value
                     })
-        
-        consumer_task = asyncio.create_task(consume_messages())
-        logger.info(f"Kafka consumer started, subscribed to {len(topics)} topics")
-        
-    except Exception as e:
-        logger.warning(f"Kafka not available: {e}. Running in standalone mode.")
+        except asyncio.CancelledError:
+            logger.info("Kafka consumer loop cancelled")
+        except Exception as e:
+            logger.error(f"Kafka consumer error: {e}")
+
+    # Launch as background task — API starts immediately, consumer retries in background
+    consumer_task = asyncio.create_task(kafka_consumer_loop())
     
     yield
 
@@ -450,6 +475,9 @@ async def lifespan(app: FastAPI):
             await consumer_task
         except asyncio.CancelledError:
             pass
+    if consumer:
+        await consumer.stop()
+        logger.info("Kafka consumer stopped")
 
     # Cleanup OTLP exporter
     if otlp_exporter:
