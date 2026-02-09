@@ -1,16 +1,14 @@
 """
 Telemetry Collector - Kafka Integration
-Kafka is ONLY for inter-agent queues. Telemetry (errors, traces, etc.) is stored internally
-and persisted to JSONL time-machine files for Claude Code debugging via MCP.
+Kafka is ONLY for inter-agent queues.
+Agents do NOT write telemetry — the Telemetry API observer captures data
+from Kafka queues and K8s pod states, then persists to JSONL files.
 """
 
 import asyncio
 import json
 import logging
-import os
-import threading
 from datetime import datetime
-from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 from contextlib import asynccontextmanager
 
@@ -39,8 +37,7 @@ class TelemetryCollector:
         self,
         kafka_bootstrap_servers: str = "localhost:9092",
         service_name: str = "multi-agent-system",
-        environment: str = "development",
-        jsonl_dir: Optional[str] = None
+        environment: str = "development"
     ):
         self.kafka_servers = kafka_bootstrap_servers
         self.service_name = service_name
@@ -58,15 +55,6 @@ class TelemetryCollector:
         self._buffer: List[KafkaMessage] = []
         self._buffer_size = 100
         self._flush_interval = 1.0  # seconds
-        
-        # JSONL time-machine persistence
-        self._jsonl_dir = Path(jsonl_dir or os.environ.get("TELEMETRY_DATA_DIR", "./telemetry_data"))
-        self._jsonl_dir.mkdir(parents=True, exist_ok=True)
-        self._diff_file = self._jsonl_dir / "diff_time_machine.jsonl"
-        self._state_file = self._jsonl_dir / "state_time_machine.jsonl"
-        self._file_lock = threading.Lock()
-        self._error_count = 0
-        self._message_count = 0
         
     async def start(self):
         """Initialize Kafka connections"""
@@ -123,45 +111,6 @@ class TelemetryCollector:
                 )
             except KafkaError as e:
                 logger.error(f"Failed to send message to Kafka: {e}")
-    
-    # ========================================================================
-    # JSONL Time-Machine Persistence
-    # ========================================================================
-    
-    def _write_diff(self, change_type: str, entity_type: str, data: Dict[str, Any]):
-        """Append an incremental diff to diff_time_machine.jsonl"""
-        diff = {
-            "timestamp": datetime.utcnow().isoformat(),
-            "change_type": change_type,
-            "entity_type": entity_type,
-            "service_name": self.service_name,
-            "data": data
-        }
-        try:
-            with self._file_lock:
-                with open(self._diff_file, "a") as f:
-                    f.write(json.dumps(diff, default=str) + "\n")
-        except Exception as e:
-            logger.error(f"Failed to write diff to JSONL: {e}")
-    
-    def _write_state_snapshot(self):
-        """Write a full state snapshot to state_time_machine.jsonl"""
-        state = {
-            "timestamp": datetime.utcnow().isoformat(),
-            "service_name": self.service_name,
-            "environment": self.environment,
-            "active_traces": len(self._active_traces),
-            "active_spans": len(self._active_spans),
-            "total_errors_recorded": self._error_count,
-            "total_messages_sent": self._message_count,
-            "kafka_connected": self._producer is not None
-        }
-        try:
-            with self._file_lock:
-                with open(self._state_file, "a") as f:
-                    f.write(json.dumps(state, default=str) + "\n")
-        except Exception as e:
-            logger.error(f"Failed to write state snapshot to JSONL: {e}")
     
     async def _send(self, topic: str, key: str, value: Dict[str, Any], immediate: bool = False):
         """Send a message to Kafka"""
@@ -285,17 +234,10 @@ class TelemetryCollector:
         immediate: bool = True
     ):
         """
-        Record a DetailedError internally and persist to diff_time_machine.jsonl.
-        Errors are NOT sent to Kafka. Claude Code reads them via the MCP server.
+        Record a DetailedError internally.
+        Agents do NOT persist errors — the Telemetry API observer captures
+        them from Kafka queue traffic and pod logs, then writes to JSONL.
         """
-        # Persist to JSONL diff file
-        self._write_diff("added", "error", error.to_dict())
-        self._error_count += 1
-        
-        # Write state snapshot every 10 errors
-        if self._error_count % 10 == 0:
-            self._write_state_snapshot()
-        
         # Notify local error handlers
         if "error_recorded" in self._event_handlers:
             for handler in self._event_handlers["error_recorded"]:
@@ -458,14 +400,6 @@ class TelemetryCollector:
             message.to_dict(),
             immediate=immediate
         )
-        
-        # Persist to JSONL diff file
-        self._write_diff("added", "agent_message", message.to_dict())
-        self._message_count += 1
-        
-        # Write state snapshot every 50 messages
-        if self._message_count % 50 == 0:
-            self._write_state_snapshot()
         
         logger.info(
             f"Sent {message.message_type.value} to {topic}: "

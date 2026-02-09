@@ -10,7 +10,8 @@ import argparse
 import json
 import os
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Optional
 
 # Add parent to path
@@ -282,6 +283,273 @@ async def cmd_debug(args):
     print(f"{Colors.YELLOW}Debug session ended.{Colors.END}")
 
 
+# ========================================================================
+# Time-Machine Commands (read JSONL files written by Telemetry API observer)
+# ========================================================================
+
+def _get_data_dir() -> Path:
+    return Path(os.environ.get("TELEMETRY_DATA_DIR", "./telemetry_data"))
+
+
+def _read_jsonl(path: Path, max_lines: int = 0) -> list:
+    if not path.exists():
+        return []
+    lines = []
+    with open(path, "r") as f:
+        for raw in f:
+            raw = raw.strip()
+            if not raw:
+                continue
+            try:
+                lines.append(json.loads(raw))
+            except json.JSONDecodeError:
+                continue
+    if max_lines > 0:
+        return lines[-max_lines:]
+    return lines
+
+
+def _filter_by_time(records: list, after: str = None, before: str = None) -> list:
+    filtered = records
+    if after:
+        try:
+            after_dt = datetime.fromisoformat(after)
+            filtered = [r for r in filtered if datetime.fromisoformat(r.get("timestamp", "")) >= after_dt]
+        except ValueError:
+            pass
+    if before:
+        try:
+            before_dt = datetime.fromisoformat(before)
+            filtered = [r for r in filtered if datetime.fromisoformat(r.get("timestamp", "")) <= before_dt]
+        except ValueError:
+            pass
+    return filtered
+
+
+def _summarize_diff(record: dict) -> str:
+    entity = record.get("entity_type", "unknown")
+    data = record.get("data", {})
+    if entity == "error":
+        sev = data.get("severity", "?")
+        msg = data.get("error_message", "")[:80]
+        agent = data.get("agent_name", "?")
+        return f"[{sev}] {agent}: {msg}"
+    if entity == "agent_message":
+        src = data.get("source_agent", "?")
+        tgt = data.get("target_agent", "?")
+        mtype = data.get("message_type", "?")
+        return f"[{mtype}] {src} -> {tgt}"
+    return json.dumps(data)[:100]
+
+
+async def cmd_errors(args):
+    """Search errors from diff_time_machine.jsonl"""
+    data_dir = _get_data_dir()
+    diff_file = data_dir / "diff_time_machine.jsonl"
+    records = _read_jsonl(diff_file)
+    records = [r for r in records if r.get("entity_type") == "error"]
+    records = _filter_by_time(records, getattr(args, "after", None), getattr(args, "before", None))
+
+    if hasattr(args, "severity") and args.severity:
+        records = [r for r in records if r.get("data", {}).get("severity") == args.severity]
+    if hasattr(args, "agent") and args.agent:
+        records = [r for r in records if r.get("data", {}).get("agent_name") == args.agent]
+
+    limit = getattr(args, "limit", 30)
+    records = list(reversed(records[-limit:]))
+
+    if args.format == "json":
+        print(json.dumps(records, indent=2, default=str))
+    else:
+        if not records:
+            print(f"{Colors.GREEN}No errors found.{Colors.END}")
+            return
+        print(f"\n{Colors.BOLD}Errors ({len(records)}){Colors.END}")
+        print(f"{'='*60}")
+        for r in records:
+            data = r.get("data", {})
+            ts = r.get("timestamp", "")[:19]
+            sev = data.get("severity", "?")
+            cat = data.get("category", "?")
+            agent = data.get("agent_name", "?")
+            msg = data.get("error_message", "")[:80]
+            color = Colors.RED if sev in ("critical", "error") else Colors.YELLOW
+            print(f"  {Colors.GRAY}{ts}{Colors.END} {color}[{sev}]{Colors.END} {cat} | {agent}: {msg}")
+
+
+async def cmd_diffs(args):
+    """Query diffs from diff_time_machine.jsonl"""
+    data_dir = _get_data_dir()
+    diff_file = data_dir / "diff_time_machine.jsonl"
+    records = _read_jsonl(diff_file)
+
+    if hasattr(args, "entity_type") and args.entity_type:
+        records = [r for r in records if r.get("entity_type") == args.entity_type]
+    records = _filter_by_time(records, getattr(args, "after", None), getattr(args, "before", None))
+
+    limit = getattr(args, "limit", 50)
+    records = list(reversed(records[-limit:]))
+
+    if args.format == "json":
+        print(json.dumps(records, indent=2, default=str))
+    else:
+        if not records:
+            print(f"{Colors.GREEN}No diffs found.{Colors.END}")
+            return
+        print(f"\n{Colors.BOLD}Diffs ({len(records)}){Colors.END}")
+        print(f"{'='*60}")
+        for r in records:
+            ts = r.get("timestamp", "")[:19]
+            entity = r.get("entity_type", "?")
+            summary = _summarize_diff(r)
+            print(f"  {Colors.GRAY}{ts}{Colors.END} [{entity}] {summary}")
+
+
+async def cmd_replay(args):
+    """Replay timeline from diff_time_machine.jsonl"""
+    data_dir = _get_data_dir()
+    diff_file = data_dir / "diff_time_machine.jsonl"
+    records = _read_jsonl(diff_file)
+
+    after = getattr(args, "after", None)
+    before = getattr(args, "before", None)
+    if not after and not before:
+        minutes = getattr(args, "minutes", 5)
+        before_dt = datetime.utcnow()
+        after_dt = before_dt - timedelta(minutes=minutes)
+        after = after_dt.isoformat()
+        before = before_dt.isoformat()
+
+    records = _filter_by_time(records, after, before)
+    limit = getattr(args, "limit", 100)
+    records = records[:limit]
+
+    if args.format == "json":
+        print(json.dumps(records, indent=2, default=str))
+    else:
+        if not records:
+            print(f"{Colors.GREEN}No events in this time window.{Colors.END}")
+            return
+        print(f"\n{Colors.BOLD}Timeline Replay ({len(records)} events){Colors.END}")
+        print(f"{'='*60}")
+        for r in records:
+            ts = r.get("timestamp", "")[:19]
+            entity = r.get("entity_type", "?")
+            summary = _summarize_diff(r)
+            print(f"  {Colors.GRAY}{ts}{Colors.END} {Colors.CYAN}[{entity}]{Colors.END} {summary}")
+
+
+async def cmd_queues(args):
+    """Show queue status from diff_time_machine.jsonl"""
+    data_dir = _get_data_dir()
+    diff_file = data_dir / "diff_time_machine.jsonl"
+    records = _read_jsonl(diff_file)
+    messages = [r for r in records if r.get("entity_type") == "agent_message"]
+
+    queues = {}
+    for msg in messages:
+        data = msg.get("data", {})
+        src = data.get("source_agent", "unknown")
+        tgt = data.get("target_agent", "unknown")
+        mtype = data.get("message_type", "unknown")
+        for name in (src, tgt):
+            if name not in queues:
+                queues[name] = {"sent": 0, "received": 0, "pending": 0}
+        queues[src]["sent"] += 1
+        queues[tgt]["received"] += 1
+        if mtype == "task":
+            queues[tgt]["pending"] += 1
+        elif mtype == "result":
+            queues[tgt]["pending"] = max(0, queues[tgt]["pending"] - 1)
+
+    if args.format == "json":
+        print(json.dumps(queues, indent=2))
+    else:
+        if not queues:
+            print(f"{Colors.GREEN}No queue data yet.{Colors.END}")
+            return
+        print(f"\n{Colors.BOLD}Agent Queue Status{Colors.END}")
+        print(f"{'='*60}")
+        print(f"  {'Agent':<20} {'Sent':>6} {'Recv':>6} {'Pending':>8}")
+        print(f"  {'-'*20} {'-'*6} {'-'*6} {'-'*8}")
+        for name, stats in sorted(queues.items()):
+            pending_color = Colors.RED if stats["pending"] > 5 else Colors.GREEN
+            print(f"  {name:<20} {stats['sent']:>6} {stats['received']:>6} {pending_color}{stats['pending']:>8}{Colors.END}")
+
+
+async def cmd_tm_diagnose(args):
+    """Full diagnostic from time-machine files"""
+    data_dir = _get_data_dir()
+    state_file = data_dir / "state_time_machine.jsonl"
+    diff_file = data_dir / "diff_time_machine.jsonl"
+
+    states = _read_jsonl(state_file, max_lines=1)
+    latest_state = states[0] if states else {}
+
+    all_diffs = _read_jsonl(diff_file)
+    error_diffs = [r for r in all_diffs if r.get("entity_type") == "error"]
+    recent_errors = error_diffs[-20:]
+
+    # Build queue status
+    messages = [r for r in all_diffs if r.get("entity_type") == "agent_message"]
+    queues = {}
+    for msg in messages:
+        data = msg.get("data", {})
+        tgt = data.get("target_agent", "unknown")
+        mtype = data.get("message_type", "unknown")
+        if tgt not in queues:
+            queues[tgt] = {"pending": 0}
+        if mtype == "task":
+            queues[tgt]["pending"] += 1
+        elif mtype == "result":
+            queues[tgt]["pending"] = max(0, queues[tgt]["pending"] - 1)
+
+    issues = []
+    critical = [r for r in recent_errors if r.get("data", {}).get("severity") == "critical"]
+    if critical:
+        issues.append(f"{len(critical)} critical error(s)")
+    for agent, stats in queues.items():
+        if stats["pending"] > 5:
+            issues.append(f"Agent '{agent}' has {stats['pending']} pending tasks")
+    agent_errors = {}
+    for r in recent_errors:
+        a = r.get("data", {}).get("agent_name", "?")
+        agent_errors[a] = agent_errors.get(a, 0) + 1
+    for a, c in agent_errors.items():
+        if c >= 5:
+            issues.append(f"Agent '{a}' has {c} recent errors")
+
+    if args.format == "json":
+        print(json.dumps({
+            "state": latest_state,
+            "recent_errors": len(recent_errors),
+            "issues": issues or ["No issues detected"]
+        }, indent=2, default=str))
+    else:
+        print(f"\n{Colors.BOLD}Diagnostic Report{Colors.END}")
+        print(f"{'='*60}")
+        if latest_state:
+            print(f"  Last snapshot: {latest_state.get('timestamp', '?')[:19]}")
+            print(f"  Total errors:  {latest_state.get('total_errors_recorded', '?')}")
+            print(f"  Total msgs:    {latest_state.get('total_messages_sent', '?')}")
+        else:
+            print(f"  {Colors.YELLOW}No state snapshots yet{Colors.END}")
+        print(f"\n  Recent errors: {len(recent_errors)}")
+        if issues:
+            print(f"\n  {Colors.RED}Issues:{Colors.END}")
+            for issue in issues:
+                print(f"    ! {issue}")
+        else:
+            print(f"\n  {Colors.GREEN}No issues detected{Colors.END}")
+        if recent_errors:
+            print(f"\n  {Colors.BOLD}Last 5 errors:{Colors.END}")
+            for r in recent_errors[-5:]:
+                d = r.get("data", {})
+                print(f"    {Colors.GRAY}{r.get('timestamp', '')[:19]}{Colors.END} "
+                      f"[{d.get('severity', '?')}] {d.get('agent_name', '?')}: "
+                      f"{d.get('error_message', '')[:60]}")
+
+
 def main():
     """Main CLI entry point"""
     parser = argparse.ArgumentParser(
@@ -296,6 +564,14 @@ Examples:
   oracle-monitor watch                    # Real-time monitoring
   oracle-monitor debug                    # Interactive debug session
   oracle-monitor state --format json      # Output as JSON
+  
+  # Time-Machine Commands (reads from JSONL files):
+  oracle-monitor errors                   # Recent errors
+  oracle-monitor errors -s critical       # Only critical errors
+  oracle-monitor diffs                    # All recent diffs
+  oracle-monitor replay -m 10            # Replay last 10 minutes
+  oracle-monitor queues                   # Inter-agent queue status
+  oracle-monitor diagnose                 # Full diagnostic report
 """
     )
     
@@ -330,6 +606,41 @@ Examples:
     # Debug command
     debug_parser = subparsers.add_parser("debug", help="Interactive debugging session")
     debug_parser.set_defaults(func=cmd_debug)
+    
+    # ── Time-Machine Commands ──────────────────────────────────
+    
+    # Errors
+    errors_parser = subparsers.add_parser("errors", help="Search errors from time-machine")
+    errors_parser.add_argument("--severity", "-s", choices=["critical", "error", "warning", "info"], help="Filter by severity")
+    errors_parser.add_argument("--agent", "-a", help="Filter by agent name")
+    errors_parser.add_argument("--after", help="After timestamp (ISO)")
+    errors_parser.add_argument("--before", help="Before timestamp (ISO)")
+    errors_parser.add_argument("--limit", "-l", type=int, default=30, help="Max results")
+    errors_parser.set_defaults(func=cmd_errors)
+    
+    # Diffs
+    diffs_parser = subparsers.add_parser("diffs", help="Query diffs from time-machine")
+    diffs_parser.add_argument("--entity-type", "-e", help="Filter by entity type (error, agent_message, ...)")
+    diffs_parser.add_argument("--after", help="After timestamp (ISO)")
+    diffs_parser.add_argument("--before", help="Before timestamp (ISO)")
+    diffs_parser.add_argument("--limit", "-l", type=int, default=50, help="Max results")
+    diffs_parser.set_defaults(func=cmd_diffs)
+    
+    # Replay
+    replay_parser = subparsers.add_parser("replay", help="Replay event timeline")
+    replay_parser.add_argument("--minutes", "-m", type=int, default=5, help="Minutes to replay (default: 5)")
+    replay_parser.add_argument("--after", help="After timestamp (ISO)")
+    replay_parser.add_argument("--before", help="Before timestamp (ISO)")
+    replay_parser.add_argument("--limit", "-l", type=int, default=100, help="Max events")
+    replay_parser.set_defaults(func=cmd_replay)
+    
+    # Queues
+    queues_parser = subparsers.add_parser("queues", help="Show inter-agent queue status")
+    queues_parser.set_defaults(func=cmd_queues)
+    
+    # Diagnose
+    diag_parser = subparsers.add_parser("diagnose", help="Full diagnostic from time-machine data")
+    diag_parser.set_defaults(func=cmd_tm_diagnose)
     
     args = parser.parse_args()
     
